@@ -204,6 +204,30 @@ test "url regex" {
             .input = "[link](/home/user/ghostty.user/example)",
             .expect = "/home/user/ghostty.user/example",
         },
+        .{
+            .input = "local foo/bar/baz.html",
+            .expect = "foo/bar/baz.html",
+        },
+        .{
+            .input = "root /foo/bar/baz.html:12",
+            .expect = "foo/bar/baz.html:12",
+        },
+        .{
+            .input = "parent ../foo/bar/baz.html but not here",
+            .expect = "../foo/bar/baz.html",
+        },
+        .{
+            .input = "current ./foo/bar/baz.html:22",
+            .expect = "./foo/bar/baz.html:22",
+        },
+        .{
+            .input = "great expantion //foo/bar/baz.html",
+            .expect = "//foo/bar/baz.html",
+        },
+        .{
+            .input = "and some file file.txt",
+            .expect = "file.txt",
+        },
         // IPv6 URL tests - Basic tests
         .{
             .input = "Serving HTTP on :: port 8000 (http://[::]:8000/)",
