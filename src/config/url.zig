@@ -26,14 +26,18 @@ pub const regex =
     "(?:" ++ url_schemes ++
     \\)(?:
 ++ ipv6_url_pattern ++
-    \\|[\w\-.~:/?#@!$&*+,;=%]+(?:[\(\[]\w*[\)\]])?)+(?<![,.])|(?:\.\.\/|\.\/*|\/)[\w\-.~:\/?#@!$&*+,;=%]+(?:\/[\w\-.~:\/?#@!$&*+,;=%]*)*
-;
+    \\|[\w\-.~:/?#@!$&*+,;=%]+(?:[\(\[]\w*[\)\]])?)+(?<![,.])
+++ local_file_pattern;
 const url_schemes =
     \\https?://|mailto:|ftp://|file:|ssh:|git://|ssh://|tel:|magnet:|ipfs://|ipns://|gemini://|gopher://|news:
 ;
 
 const ipv6_url_pattern =
     \\(?:\[[:0-9a-fA-F]+(?:[:0-9a-fA-F]*)+\](?::[0-9]+)?)
+;
+
+const local_file_pattern =
+    \\|(?:\.\.\/|\.\/*|\/)[\w\-.~:\/?#@!$&*+,;=%]+(?:\/[\w\-.~:\/?#@!$&*+,;=%]*)*
 ;
 
 test "url regex" {
