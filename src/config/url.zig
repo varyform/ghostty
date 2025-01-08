@@ -37,11 +37,19 @@ const ipv6_url_pattern =
 ;
 
 const local_file_pattern =
+    // optional leading file name
     \\|(?:
 ++ file_path_part ++
-    \\+)?(?:\.\.\/|\.\/*|\/)
+    \\+)?
+    ++
+    // relative or absolute path prefix
+    \\(?:\.\.\/|\.\/*|\/)
+    // required main part of the path
 ++ file_path_part ++
-    \\+(?:\/
+    \\+
+    ++
+    // remaining nested path parts
+    \\(?:\/
 ++ file_path_part ++
     \\*)*
 ;
