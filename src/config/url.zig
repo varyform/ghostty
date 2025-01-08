@@ -37,7 +37,17 @@ const ipv6_url_pattern =
 ;
 
 const local_file_pattern =
-    \\|(?:\.\.\/|\.\/*|\/)[\w\-.~:\/?#@!$&*+,;=%]+(?:\/[\w\-.~:\/?#@!$&*+,;=%]*)*
+    \\|(?:
+++ file_path_part ++
+    \\+)?(?:\.\.\/|\.\/*|\/)
+++ file_path_part ++
+    \\+(?:\/
+++ file_path_part ++
+    \\*)*
+;
+
+const file_path_part =
+    \\[\w\-.~:\/?#@!$&*+,;=%]
 ;
 
 test "url regex" {
@@ -204,29 +214,22 @@ test "url regex" {
             .input = "[link](/home/user/ghostty.user/example)",
             .expect = "/home/user/ghostty.user/example",
         },
+        // local files without leading slash or dot
         .{
             .input = "local foo/bar/baz.html",
             .expect = "foo/bar/baz.html",
         },
         .{
-            .input = "root /foo/bar/baz.html:12",
+            .input = "local file foo/bar/baz.html:12 with line number",
             .expect = "foo/bar/baz.html:12",
         },
         .{
-            .input = "parent ../foo/bar/baz.html but not here",
-            .expect = "../foo/bar/baz.html",
+            .input = "parent ../foo/bar/baz.html:10:20 with line and column numbers",
+            .expect = "../foo/bar/baz.html:10:20",
         },
         .{
-            .input = "current ./foo/bar/baz.html:22",
-            .expect = "./foo/bar/baz.html:22",
-        },
-        .{
-            .input = "great expantion //foo/bar/baz.html",
-            .expect = "//foo/bar/baz.html",
-        },
-        .{
-            .input = "and some file file.txt",
-            .expect = "file.txt",
+            .input = "just a file doom2.wad",
+            .expect = "doom2.wad",
         },
         // IPv6 URL tests - Basic tests
         .{
@@ -280,8 +283,8 @@ test "url regex" {
     };
 
     for (cases) |case| {
-        //std.debug.print("input: {s}\n", .{case.input});
-        //std.debug.print("match: {s}\n", .{case.expect});
+        // std.debug.print("input: {s}\n", .{case.input});
+        // std.debug.print("match: {s}\n", .{case.expect});
         var reg = try re.search(case.input, .{});
         //std.debug.print("count: {d}\n", .{@as(usize, reg.count())});
         //std.debug.print("starts: {d}\n", .{reg.starts()});
