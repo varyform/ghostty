@@ -270,7 +270,7 @@ pub fn init(self: *Window, app: *App) !void {
     }
 
     self.context_menu = c.gtk_popover_menu_new_from_model(@ptrCast(@alignCast(self.app.context_menu)));
-    c.gtk_widget_set_parent(self.context_menu, window);
+    c.gtk_widget_set_parent(self.context_menu, box);
     c.gtk_popover_set_has_arrow(@ptrCast(@alignCast(self.context_menu)), 0);
     c.gtk_widget_set_halign(self.context_menu, c.GTK_ALIGN_START);
 
@@ -447,6 +447,22 @@ pub fn deinit(self: *Window) void {
 
     if (self.adw_tab_overview_focus_timer) |timer| {
         _ = c.g_source_remove(timer);
+    }
+}
+
+/// Set the title of the window.
+pub fn setTitle(self: *Window, title: [:0]const u8) void {
+    if ((comptime adwaita.versionAtLeast(1, 4, 0)) and adwaita.versionAtLeast(1, 4, 0) and adwaita.enabled(&self.app.config) and self.app.config.@"gtk-titlebar") {
+        if (self.header) |header| header.setTitle(title);
+    } else {
+        c.gtk_window_set_title(self.window, title);
+    }
+}
+
+/// Set the subtitle of the window if it has one.
+pub fn setSubtitle(self: *Window, subtitle: [:0]const u8) void {
+    if ((comptime adwaita.versionAtLeast(1, 4, 0)) and adwaita.versionAtLeast(1, 4, 0) and adwaita.enabled(&self.app.config) and self.app.config.@"gtk-titlebar") {
+        if (self.header) |header| header.setSubtitle(subtitle);
     }
 }
 
