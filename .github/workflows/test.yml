@@ -6,51 +6,49 @@ on:
 name: Test
 
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: ["namespace-profile-ghostty-md"]
-
-        target: [
-            aarch64-linux,
-            x86_64-linux,
-            x86-windows-gnu,
-            x86_64-windows-gnu,
-            # We don't support cross-compiling to macOS because the macOS build
-            # requires xcode due to the swift harness.
-            #aarch64-macos,
-            #x86_64-macos,
-          ]
-    runs-on: ${{ matrix.os }}
-    needs: test
-    env:
-      ZIG_LOCAL_CACHE_DIR: /zig/local-cache
-      ZIG_GLOBAL_CACHE_DIR: /zig/global-cache
+  required:
+    name: "Required Checks: Test"
+    runs-on: namespace-profile-ghostty-sm
+    needs:
+      - build-bench
+      - build-flatpak
+      - build-linux
+      - build-linux-libghostty
+      - build-nix
+      - build-snap
+      - build-macos
+      - build-macos-matrix
+      - build-windows
+      - build-windows-cross
+      - test
+      - test-gtk
+      - test-sentry-linux
+      - test-macos
+      - prettier
+      - alejandra
+      - typos
+      - translations
+      - test-pkg-linux
+      - test-debian-12
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Cache
-        uses: namespacelabs/nscloud-cache-action@v1.2.0
-        with:
-          path: |
-            /nix
-            /zig
-
-      # Install Nix and use that to run our tests so our environment matches exactly.
-      - uses: cachix/install-nix-action@v30
-        with:
-          nix_path: nixpkgs=channel:nixos-unstable
-      - uses: cachix/cachix-action@v15
-        with:
-          name: ghostty
-          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
-
-      # Cross-compile the binary. We always use static building for this
-      # because its the only way to access the headers.
-      - name: Test Build
-        run: nix develop -c zig build -Dapp-runtime=glfw -Dtarget=${{ matrix.target }}
+      - id: status
+        name: Determine status
+        run: |
+          results=$(tr -d '\n' <<< '${{ toJSON(needs.*.result) }}')
+          if ! grep -q -v -E '(failure|cancelled)' <<< "$results"; then
+            result="failed"
+          else
+            result="success"
+          fi
+          {
+            echo "result=${result}"
+            echo "results=${results}"
+          } | tee -a "$GITHUB_OUTPUT"
+      - if: always() && steps.status.outputs.result != 'success'
+        name: Check for failed status
+        run: |
+          echo "One or more required build workflows failed: ${{ steps.status.outputs.results }}"
+          exit 1
 
   build-bench:
     # We build benchmarks on large because it uses ReleaseFast
@@ -81,6 +79,73 @@ jobs:
 
       - name: Build Benchmarks
         run: nix develop -c zig build -Dapp-runtime=glfw -Demit-bench
+
+  build-flatpak:
+    strategy:
+      fail-fast: false
+    runs-on: namespace-profile-ghostty-sm
+    needs: test
+    env:
+      ZIG_LOCAL_CACHE_DIR: /zig/local-cache
+      ZIG_GLOBAL_CACHE_DIR: /zig/global-cache
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Cache
+        uses: namespacelabs/nscloud-cache-action@v1.2.0
+        with:
+          path: |
+            /nix
+            /zig
+
+      # Install Nix and use that to run our tests so our environment matches exactly.
+      - uses: cachix/install-nix-action@v30
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+      - uses: cachix/cachix-action@v15
+        with:
+          name: ghostty
+          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
+
+      - name: Build with Flatpak
+        run: |
+          nix develop -c \
+            zig build \
+            -Dflatpak=true
+
+  build-linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [namespace-profile-ghostty-md, namespace-profile-ghostty-md-arm64]
+    runs-on: ${{ matrix.os }}
+    needs: test
+    env:
+      ZIG_LOCAL_CACHE_DIR: /zig/local-cache
+      ZIG_GLOBAL_CACHE_DIR: /zig/global-cache
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Cache
+        uses: namespacelabs/nscloud-cache-action@v1.2.0
+        with:
+          path: |
+            /nix
+            /zig
+
+      # Install Nix and use that to run our tests so our environment matches exactly.
+      - uses: cachix/install-nix-action@v30
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+      - uses: cachix/cachix-action@v15
+        with:
+          name: ghostty
+          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
+
+      - name: Test Build
+        run: nix develop -c zig build -Dapp-runtime=glfw
 
   build-linux-libghostty:
     runs-on: namespace-profile-ghostty-md
@@ -163,10 +228,14 @@ jobs:
       - name: XCode Select
         run: sudo xcode-select -s /Applications/Xcode_16.0.app
 
+      - name: get the Zig deps
+        id: deps
+        run: nix build -L .#deps && echo "deps=$(readlink ./result)" >> $GITHUB_OUTPUT
+
       # GhosttyKit is the framework that is built from Zig for our native
       # Mac app to access.
       - name: Build GhosttyKit
-        run: nix develop -c zig build
+        run: nix develop -c zig build --system ${{ steps.deps.outputs.deps }}
 
       # The native app is built with native XCode tooling. This also does
       # codesigning. IMPORTANT: this must NOT run in a Nix environment.
@@ -199,35 +268,65 @@ jobs:
       - name: XCode Select
         run: sudo xcode-select -s /Applications/Xcode_16.0.app
 
+      - name: get the Zig deps
+        id: deps
+        run: nix build -L .#deps && echo "deps=$(readlink ./result)" >> $GITHUB_OUTPUT
+
       - name: Test All
         run: |
           # OpenGL
-          nix develop -c zig build test -Dapp-runtime=glfw -Drenderer=opengl -Dfont-backend=freetype
-          nix develop -c zig build test -Dapp-runtime=glfw -Drenderer=opengl -Dfont-backend=coretext
-          nix develop -c zig build test -Dapp-runtime=glfw -Drenderer=opengl -Dfont-backend=coretext_freetype
-          nix develop -c zig build test -Dapp-runtime=glfw -Drenderer=opengl -Dfont-backend=coretext_harfbuzz
-          nix develop -c zig build test -Dapp-runtime=glfw -Drenderer=opengl -Dfont-backend=coretext_noshape
+          nix develop -c zig build test --system ${{ steps.deps.outputs.deps }} -Dapp-runtime=glfw -Drenderer=opengl -Dfont-backend=freetype
+          nix develop -c zig build test --system ${{ steps.deps.outputs.deps }} -Dapp-runtime=glfw -Drenderer=opengl -Dfont-backend=coretext
+          nix develop -c zig build test --system ${{ steps.deps.outputs.deps }} -Dapp-runtime=glfw -Drenderer=opengl -Dfont-backend=coretext_freetype
+          nix develop -c zig build test --system ${{ steps.deps.outputs.deps }} -Dapp-runtime=glfw -Drenderer=opengl -Dfont-backend=coretext_harfbuzz
+          nix develop -c zig build test --system ${{ steps.deps.outputs.deps }} -Dapp-runtime=glfw -Drenderer=opengl -Dfont-backend=coretext_noshape
 
           # Metal
-          nix develop -c zig build test -Dapp-runtime=glfw -Drenderer=metal -Dfont-backend=freetype
-          nix develop -c zig build test -Dapp-runtime=glfw -Drenderer=metal -Dfont-backend=coretext
-          nix develop -c zig build test -Dapp-runtime=glfw -Drenderer=metal -Dfont-backend=coretext_freetype
-          nix develop -c zig build test -Dapp-runtime=glfw -Drenderer=metal -Dfont-backend=coretext_harfbuzz
-          nix develop -c zig build test -Dapp-runtime=glfw -Drenderer=metal -Dfont-backend=coretext_noshape
+          nix develop -c zig build test --system ${{ steps.deps.outputs.deps }} -Dapp-runtime=glfw -Drenderer=metal -Dfont-backend=freetype
+          nix develop -c zig build test --system ${{ steps.deps.outputs.deps }} -Dapp-runtime=glfw -Drenderer=metal -Dfont-backend=coretext
+          nix develop -c zig build test --system ${{ steps.deps.outputs.deps }} -Dapp-runtime=glfw -Drenderer=metal -Dfont-backend=coretext_freetype
+          nix develop -c zig build test --system ${{ steps.deps.outputs.deps }} -Dapp-runtime=glfw -Drenderer=metal -Dfont-backend=coretext_harfbuzz
+          nix develop -c zig build test --system ${{ steps.deps.outputs.deps }} -Dapp-runtime=glfw -Drenderer=metal -Dfont-backend=coretext_noshape
 
       - name: Build All
         run: |
-          nix develop -c zig build -Dapp-runtime=glfw -Drenderer=opengl -Dfont-backend=freetype
-          nix develop -c zig build -Dapp-runtime=glfw -Drenderer=opengl -Dfont-backend=coretext
-          nix develop -c zig build -Dapp-runtime=glfw -Drenderer=opengl -Dfont-backend=coretext_freetype
-          nix develop -c zig build -Dapp-runtime=glfw -Drenderer=opengl -Dfont-backend=coretext_harfbuzz
-          nix develop -c zig build -Dapp-runtime=glfw -Drenderer=opengl -Dfont-backend=coretext_noshape
+          nix develop -c zig build --system ${{ steps.deps.outputs.deps }} -Dapp-runtime=glfw -Drenderer=opengl -Dfont-backend=freetype
+          nix develop -c zig build --system ${{ steps.deps.outputs.deps }} -Dapp-runtime=glfw -Drenderer=opengl -Dfont-backend=coretext
+          nix develop -c zig build --system ${{ steps.deps.outputs.deps }} -Dapp-runtime=glfw -Drenderer=opengl -Dfont-backend=coretext_freetype
+          nix develop -c zig build --system ${{ steps.deps.outputs.deps }} -Dapp-runtime=glfw -Drenderer=opengl -Dfont-backend=coretext_harfbuzz
+          nix develop -c zig build --system ${{ steps.deps.outputs.deps }} -Dapp-runtime=glfw -Drenderer=opengl -Dfont-backend=coretext_noshape
 
-          nix develop -c zig build -Dapp-runtime=glfw -Drenderer=metal -Dfont-backend=freetype
-          nix develop -c zig build -Dapp-runtime=glfw -Drenderer=metal -Dfont-backend=coretext
-          nix develop -c zig build -Dapp-runtime=glfw -Drenderer=metal -Dfont-backend=coretext_freetype
-          nix develop -c zig build -Dapp-runtime=glfw -Drenderer=metal -Dfont-backend=coretext_harfbuzz
-          nix develop -c zig build -Dapp-runtime=glfw -Drenderer=metal -Dfont-backend=coretext_noshape
+          nix develop -c zig build --system ${{ steps.deps.outputs.deps }} -Dapp-runtime=glfw -Drenderer=metal -Dfont-backend=freetype
+          nix develop -c zig build --system ${{ steps.deps.outputs.deps }} -Dapp-runtime=glfw -Drenderer=metal -Dfont-backend=coretext
+          nix develop -c zig build --system ${{ steps.deps.outputs.deps }} -Dapp-runtime=glfw -Drenderer=metal -Dfont-backend=coretext_freetype
+          nix develop -c zig build --system ${{ steps.deps.outputs.deps }} -Dapp-runtime=glfw -Drenderer=metal -Dfont-backend=coretext_harfbuzz
+          nix develop -c zig build --system ${{ steps.deps.outputs.deps }} -Dapp-runtime=glfw -Drenderer=metal -Dfont-backend=coretext_noshape
+
+  build-snap:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          [namespace-profile-ghostty-snap, namespace-profile-ghostty-snap-arm64]
+    runs-on: ${{ matrix.os }}
+    needs: test
+    env:
+      ZIG_LOCAL_CACHE_DIR: /zig/local-cache
+      ZIG_GLOBAL_CACHE_DIR: /zig/global-cache
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Setup Cache
+        uses: namespacelabs/nscloud-cache-action@v1.2.0
+        with:
+          path: |
+            /nix
+            /zig
+      - run: sudo apt install -y udev
+      - run: sudo systemctl start systemd-udevd
+      - uses: snapcore/action-build@v1
 
   build-windows:
     runs-on: windows-2022
@@ -297,6 +396,52 @@ jobs:
         shell: pwsh
         run: Get-Content -Path ".\build.log"
 
+  build-windows-cross:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ["namespace-profile-ghostty-md"]
+
+        target: [
+            x86-windows-gnu,
+            x86_64-windows-gnu,
+            # We don't support cross-compiling to macOS or Linux because
+            # we require system libraries.
+            #aarch64-linux,
+            #x86_64-linux,
+            #aarch64-macos,
+            #x86_64-macos,
+          ]
+    runs-on: ${{ matrix.os }}
+    needs: test
+    env:
+      ZIG_LOCAL_CACHE_DIR: /zig/local-cache
+      ZIG_GLOBAL_CACHE_DIR: /zig/global-cache
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Cache
+        uses: namespacelabs/nscloud-cache-action@v1.2.0
+        with:
+          path: |
+            /nix
+            /zig
+
+      # Install Nix and use that to run our tests so our environment matches exactly.
+      - uses: cachix/install-nix-action@v30
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+      - uses: cachix/cachix-action@v15
+        with:
+          name: ghostty
+          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
+
+      # Cross-compile the binary. We always use static building for this
+      # because its the only way to access the headers.
+      - name: Test Build
+        run: nix develop -c zig build -Dapp-runtime=glfw -Dtarget=${{ matrix.target }}
+
   test:
     if: github.repository == 'ghostty-org/ghostty'
     runs-on: namespace-profile-ghostty-md
@@ -327,7 +472,7 @@ jobs:
         run: nix develop -c zig build -Dapp-runtime=none test
 
       - name: Test GTK Build
-        run: nix develop -c zig build -Dapp-runtime=gtk -Dgtk-adwaita=true -Demit-docs
+        run: nix develop -c zig build -Dapp-runtime=gtk -Demit-docs
 
       - name: Test GLFW Build
         run: nix develop -c zig build -Dapp-runtime=glfw
@@ -340,9 +485,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        adwaita: ["true", "false"]
         x11: ["true", "false"]
-    name: GTK adwaita=${{ matrix.adwaita }} x11=${{ matrix.x11 }}
+        wayland: ["true", "false"]
+    name: GTK x11=${{ matrix.x11 }} wayland=${{ matrix.wayland }}
     runs-on: namespace-profile-ghostty-sm
     needs: test
     env:
@@ -373,8 +518,8 @@ jobs:
           nix develop -c \
             zig build \
             -Dapp-runtime=gtk \
-            -Dgtk-adwaita=${{ matrix.adwaita }} \
-            -Dgtk-x11=${{ matrix.x11 }}
+            -Dgtk-x11=${{ matrix.x11 }} \
+            -Dgtk-wayland=${{ matrix.wayland }}
 
   test-sentry-linux:
     strategy:
@@ -430,8 +575,12 @@ jobs:
       - name: XCode Select
         run: sudo xcode-select -s /Applications/Xcode_16.0.app
 
+      - name: get the Zig deps
+        id: deps
+        run: nix build -L .#deps && echo "deps=$(readlink ./result)" >> $GITHUB_OUTPUT
+
       - name: test
-        run: nix develop -c zig build test
+        run: nix develop -c zig build test --system ${{ steps.deps.outputs.deps }}
 
   prettier:
     if: github.repository == 'ghostty-org/ghostty'
@@ -514,6 +663,45 @@ jobs:
       - name: typos check
         run: nix develop -c typos
 
+  translations:
+    if: github.repository == 'ghostty-org/ghostty'
+    runs-on: namespace-profile-ghostty-sm
+    timeout-minutes: 60
+    env:
+      ZIG_LOCAL_CACHE_DIR: /zig/local-cache
+      ZIG_GLOBAL_CACHE_DIR: /zig/global-cache
+    steps:
+      - uses: actions/checkout@v4 # Check out repo so we can lint it
+      - name: Setup Cache
+        uses: namespacelabs/nscloud-cache-action@v1.2.0
+        with:
+          path: |
+            /nix
+            /zig
+      - uses: cachix/install-nix-action@v30
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+      - uses: cachix/cachix-action@v15
+        with:
+          name: ghostty
+          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
+          skipPush: true
+          useDaemon: false # sometimes fails on short jobs
+      - name: check translations
+        run: |
+          old_pot=$(mktemp)
+          cp po/com.mitchellh.ghostty.pot "$old_pot"
+          nix develop -c zig build update-translations
+
+          # Compare previous POT to current POT
+          msgcmp "$old_pot" po/com.mitchellh.ghostty.pot --use-untranslated
+
+          # Compare all other POs to current POT
+          for f in po/*.po; do
+            # Ignore untranslated entries
+            msgcmp --use-untranslated "$f" po/com.mitchellh.ghostty.pot;
+          done
+
   test-pkg-linux:
     strategy:
       fail-fast: false
@@ -548,3 +736,25 @@ jobs:
       - name: Test ${{ matrix.pkg }} Build
         run: |
           nix develop -c sh -c "cd pkg/${{ matrix.pkg }} ; zig build test"
+
+  test-debian-12:
+    name: Test build on Debian 12
+    runs-on: namespace-profile-ghostty-sm
+    needs: test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install and configure Namespace CLI
+        uses: namespacelabs/nscloud-setup@v0
+
+      - name: Configure Namespace powered Buildx
+        uses: namespacelabs/nscloud-setup-buildx-action@v0
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: src/build/docker/debian/Dockerfile
+          build-args: |
+            DISTRO_VERSION=12

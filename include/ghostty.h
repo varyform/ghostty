@@ -159,7 +159,7 @@ typedef enum {
   GHOSTTY_KEY_EQUAL,
   GHOSTTY_KEY_LEFT_BRACKET,   // [
   GHOSTTY_KEY_RIGHT_BRACKET,  // ]
-  GHOSTTY_KEY_BACKSLASH,      // /
+  GHOSTTY_KEY_BACKSLASH,      // \
 
   // control
   GHOSTTY_KEY_UP,
@@ -412,6 +412,7 @@ typedef enum {
   GHOSTTY_FULLSCREEN_NATIVE,
   GHOSTTY_FULLSCREEN_NON_NATIVE,
   GHOSTTY_FULLSCREEN_NON_NATIVE_VISIBLE_MENU,
+  GHOSTTY_FULLSCREEN_NON_NATIVE_PADDED_NOTCH,
 } ghostty_action_fullscreen_e;
 
 // apprt.action.SecureInput
@@ -565,6 +566,7 @@ typedef enum {
   GHOSTTY_ACTION_CLOSE_TAB,
   GHOSTTY_ACTION_NEW_SPLIT,
   GHOSTTY_ACTION_CLOSE_ALL_WINDOWS,
+  GHOSTTY_ACTION_TOGGLE_MAXIMIZE,
   GHOSTTY_ACTION_TOGGLE_FULLSCREEN,
   GHOSTTY_ACTION_TOGGLE_TAB_OVERVIEW,
   GHOSTTY_ACTION_TOGGLE_WINDOW_DECORATIONS,
@@ -578,12 +580,14 @@ typedef enum {
   GHOSTTY_ACTION_TOGGLE_SPLIT_ZOOM,
   GHOSTTY_ACTION_PRESENT_TERMINAL,
   GHOSTTY_ACTION_SIZE_LIMIT,
+  GHOSTTY_ACTION_RESET_WINDOW_SIZE,
   GHOSTTY_ACTION_INITIAL_SIZE,
   GHOSTTY_ACTION_CELL_SIZE,
   GHOSTTY_ACTION_INSPECTOR,
   GHOSTTY_ACTION_RENDER_INSPECTOR,
   GHOSTTY_ACTION_DESKTOP_NOTIFICATION,
   GHOSTTY_ACTION_SET_TITLE,
+  GHOSTTY_ACTION_PROMPT_TITLE,
   GHOSTTY_ACTION_PWD,
   GHOSTTY_ACTION_MOUSE_SHAPE,
   GHOSTTY_ACTION_MOUSE_VISIBILITY,
@@ -596,6 +600,7 @@ typedef enum {
   GHOSTTY_ACTION_COLOR_CHANGE,
   GHOSTTY_ACTION_RELOAD_CONFIG,
   GHOSTTY_ACTION_CONFIG_CHANGE,
+  GHOSTTY_ACTION_CLOSE_WINDOW,
 } ghostty_action_tag_e;
 
 typedef union {
@@ -643,7 +648,7 @@ typedef void (*ghostty_runtime_write_clipboard_cb)(void*,
                                                    ghostty_clipboard_e,
                                                    bool);
 typedef void (*ghostty_runtime_close_surface_cb)(void*, bool);
-typedef void (*ghostty_runtime_action_cb)(ghostty_app_t,
+typedef bool (*ghostty_runtime_action_cb)(ghostty_app_t,
                                           ghostty_target_s,
                                           ghostty_action_s);
 
@@ -664,6 +669,7 @@ typedef struct {
 int ghostty_init(void);
 void ghostty_cli_main(uintptr_t, char**);
 ghostty_info_s ghostty_info(void);
+const char* ghostty_translate(const char*);
 
 ghostty_config_t ghostty_config_new();
 void ghostty_config_free(ghostty_config_t);

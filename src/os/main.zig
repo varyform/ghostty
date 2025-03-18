@@ -17,6 +17,7 @@ const resourcesdir = @import("resourcesdir.zig");
 pub const args = @import("args.zig");
 pub const cgroup = @import("cgroup.zig");
 pub const hostname = @import("hostname.zig");
+pub const i18n = @import("i18n.zig");
 pub const passwd = @import("passwd.zig");
 pub const xdg = @import("xdg.zig");
 pub const windows = @import("windows.zig");
@@ -26,6 +27,7 @@ pub const shell = @import("shell.zig");
 // Functions and types
 pub const CFReleaseThread = @import("cf_release_thread.zig");
 pub const TempDir = @import("TempDir.zig");
+pub const getEnvMap = env.getEnvMap;
 pub const appendEnv = env.appendEnv;
 pub const appendEnvAlways = env.appendEnvAlways;
 pub const prependEnv = env.prependEnv;
@@ -50,3 +52,7 @@ pub const OpenType = openpkg.Type;
 pub const pipe = pipepkg.pipe;
 pub const resourcesDir = resourcesdir.resourcesDir;
 pub const ShellEscapeWriter = shell.ShellEscapeWriter;
+
+test {
+    _ = i18n;
+}

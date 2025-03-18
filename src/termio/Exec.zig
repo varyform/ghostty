@@ -9,7 +9,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const posix = std.posix;
-const xev = @import("xev");
+const xev = @import("../global.zig").xev;
 const build_config = @import("../build_config.zig");
 const configpkg = @import("../config.zig");
 const crash = @import("../crash/main.zig");
@@ -30,6 +30,12 @@ const log = std.log.scoped(.io_exec);
 
 /// The termios poll rate in milliseconds.
 const TERMIOS_POLL_MS = 200;
+
+/// If we build with flatpak support then we have to keep track of
+/// a potential execution on the host.
+const FlatpakHostCommand = if (!build_config.flatpak) struct {
+    pub const Completion = struct {};
+} else internal_os.FlatpakHostCommand;
 
 /// The subprocess state for our exec backend.
 subprocess: Subprocess,
@@ -95,11 +101,26 @@ pub fn threadEnter(
     };
     errdefer self.subprocess.stop();
 
-    // Get the pid from the subprocess
-    const pid = pid: {
-        const command = self.subprocess.command orelse return error.ProcessNotStarted;
-        break :pid command.pid orelse return error.ProcessNoPid;
+    // Watcher to detect subprocess exit
+    var process: ?xev.Process = process: {
+        // If we're executing via Flatpak then we can't do
+        // traditional process watching (its implemented
+        // as a special case in os/flatpak.zig) since the
+        // command is on the host.
+        if (comptime build_config.flatpak) {
+            if (self.subprocess.flatpak_command != null) {
+                break :process null;
+            }
+        }
+
+        // Get the pid from the subprocess
+        const command = self.subprocess.command orelse
+            return error.ProcessNotStarted;
+        const pid = command.pid orelse
+            return error.ProcessNoPid;
+        break :process try xev.Process.init(pid);
     };
+    errdefer if (process) |*p| p.deinit();
 
     // Track our process start time for abnormal exits
     const process_start = try std.time.Instant.now();
@@ -113,10 +134,6 @@ pub fn threadEnter(
     // Setup our stream so that we can write.
     var stream = xev.Stream.initFd(pty_fds.write);
     errdefer stream.deinit();
-
-    // Watcher to detect subprocess exit
-    var process = try xev.Process.init(pid);
-    errdefer process.deinit();
 
     // Start our timer to read termios state changes. This is used
     // to detect things such as when password input is being done
@@ -145,14 +162,26 @@ pub fn threadEnter(
         .termios_timer = termios_timer,
     } };
 
-    // Start our process watcher
-    process.wait(
+    // Start our process watcher. If we have an xev.Process use it.
+    if (process) |*p| p.wait(
         td.loop,
         &td.backend.exec.process_wait_c,
         termio.Termio.ThreadData,
         td,
         processExit,
-    );
+    ) else if (comptime build_config.flatpak) {
+        // If we're in flatpak and we have a flatpak command
+        // then we can run the special flatpak logic for watching.
+        if (self.subprocess.flatpak_command) |*c| {
+            c.waitXev(
+                td.loop,
+                &td.backend.exec.flatpak_wait_c,
+                termio.Termio.ThreadData,
+                td,
+                flatpakExit,
+            );
+        }
+    }
 
     // Start our termios timer. We don't support this on Windows.
     // Fundamentally, we could support this on Windows so we're just
@@ -179,11 +208,17 @@ pub fn threadExit(self: *Exec, td: *termio.Termio.ThreadData) void {
     // Quit our read thread after exiting the subprocess so that
     // we don't get stuck waiting for data to stop flowing if it is
     // a particularly noisy process.
-    if (exec.read_thread_pipe) |pipe| {
-        posix.close(pipe);
-        // Tell deinit that we've already closed the pipe
-        exec.read_thread_pipe = null;
-    }
+    _ = posix.write(exec.read_thread_pipe, "x") catch |err| switch (err) {
+        // BrokenPipe means that our read thread is closed already,
+        // which is completely fine since that is what we were trying
+        // to achieve.
+        error.BrokenPipe => {},
+
+        else => log.warn(
+            "error writing to read thread quit pipe err={}",
+            .{err},
+        ),
+    };
 
     if (comptime builtin.os.tag == .windows) {
         // Interrupt the blocking read so the thread can see the quit message
@@ -295,7 +330,7 @@ pub fn childExitedAbnormally(
 
     // We don't print this on macOS because the exit code is always 0
     // due to the way we launch the process.
-    if (comptime !builtin.target.isDarwin()) {
+    if (comptime !builtin.target.os.tag.isDarwin()) {
         const exit_code_str = try std.fmt.allocPrint(alloc, "{d}", .{exit_code});
         t.carriageReturn();
         try t.linefeed();
@@ -333,15 +368,7 @@ fn execFailedInChild() !void {
     _ = try reader.read(&buf);
 }
 
-fn processExit(
-    td_: ?*termio.Termio.ThreadData,
-    _: *xev.Loop,
-    _: *xev.Completion,
-    r: xev.Process.WaitError!u32,
-) xev.CallbackAction {
-    const exit_code = r catch unreachable;
-
-    const td = td_.?;
+fn processExitCommon(td: *termio.Termio.ThreadData, exit_code: u32) void {
     assert(td.backend == .exec);
     const execdata = &td.backend.exec;
     execdata.exited = true;
@@ -363,7 +390,7 @@ fn processExit(
     if (runtime_ms) |runtime| runtime: {
         // On macOS, our exit code detection doesn't work, possibly
         // because of our `login` wrapper. More investigation required.
-        if (comptime !builtin.target.isDarwin()) {
+        if (comptime !builtin.target.os.tag.isDarwin()) {
             // If our exit code is zero, then the command was successful
             // and we don't ever consider it abnormal.
             if (exit_code == 0) break :runtime;
@@ -387,7 +414,7 @@ fn processExit(
         }, null);
         td.mailbox.notify();
 
-        return .disarm;
+        return;
     }
 
     // If we're purposely waiting then we just return since the process
@@ -407,15 +434,34 @@ fn processExit(
             t.modes.set(.cursor_visible, false);
         }
 
-        return .disarm;
+        return;
     }
 
     // Notify our surface we want to close
     _ = td.surface_mailbox.push(.{
         .child_exited = {},
     }, .{ .forever = {} });
+}
 
+fn processExit(
+    td_: ?*termio.Termio.ThreadData,
+    _: *xev.Loop,
+    _: *xev.Completion,
+    r: xev.Process.WaitError!u32,
+) xev.CallbackAction {
+    const exit_code = r catch unreachable;
+    processExitCommon(td_.?, exit_code);
     return .disarm;
+}
+
+fn flatpakExit(
+    td_: ?*termio.Termio.ThreadData,
+    _: *xev.Loop,
+    _: *FlatpakHostCommand.Completion,
+    r: FlatpakHostCommand.WaitError!u8,
+) void {
+    const exit_code = r catch unreachable;
+    processExitCommon(td_.?, exit_code);
 }
 
 fn termiosTimer(
@@ -583,7 +629,7 @@ fn ttyWrite(
     _: *xev.Completion,
     _: xev.Stream,
     _: xev.WriteBuffer,
-    r: xev.Stream.WriteError!usize,
+    r: xev.WriteError!usize,
 ) xev.CallbackAction {
     const td = td_.?;
     td.write_req_pool.put();
@@ -624,25 +670,29 @@ pub const ThreadData = struct {
     write_stream: xev.Stream,
 
     /// The process watcher
-    process: xev.Process,
+    process: ?xev.Process,
 
     /// This is the pool of available (unused) write requests. If you grab
     /// one from the pool, you must put it back when you're done!
-    write_req_pool: SegmentedPool(xev.Stream.WriteRequest, WRITE_REQ_PREALLOC) = .{},
+    write_req_pool: SegmentedPool(xev.WriteRequest, WRITE_REQ_PREALLOC) = .{},
 
     /// The pool of available buffers for writing to the pty.
     write_buf_pool: SegmentedPool([64]u8, WRITE_REQ_PREALLOC) = .{},
 
     /// The write queue for the data stream.
-    write_queue: xev.Stream.WriteQueue = .{},
+    write_queue: xev.WriteQueue = .{},
 
     /// This is used for both waiting for the process to exit and then
     /// subsequently to wait for the data_stream to close.
     process_wait_c: xev.Completion = .{},
 
+    // The completion specific to Flatpak process waiting. If
+    // we aren't compiling with Flatpak support this is zero-sized.
+    flatpak_wait_c: FlatpakHostCommand.Completion = .{},
+
     /// Reader thread state
     read_thread: std.Thread,
-    read_thread_pipe: ?posix.fd_t,
+    read_thread_pipe: posix.fd_t,
     read_thread_fd: posix.fd_t,
 
     /// The timer to detect termios state changes.
@@ -655,8 +705,7 @@ pub const ThreadData = struct {
     termios_mode: ptypkg.Mode = .{},
 
     pub fn deinit(self: *ThreadData, alloc: Allocator) void {
-        // If the pipe isn't closed, close it.
-        if (self.read_thread_pipe) |pipe| posix.close(pipe);
+        posix.close(self.read_thread_pipe);
 
         // Clear our write pools. We know we aren't ever going to do
         // any more IO since we stop our data stream below so we can just
@@ -665,7 +714,7 @@ pub const ThreadData = struct {
         self.write_buf_pool.deinit(alloc);
 
         // Stop our process watcher
-        self.process.deinit();
+        if (self.process) |*p| p.deinit();
 
         // Stop our write stream
         self.write_stream.deinit();
@@ -677,6 +726,8 @@ pub const ThreadData = struct {
 
 pub const Config = struct {
     command: ?[]const u8 = null,
+    env: EnvMap,
+    env_override: configpkg.RepeatableStringMap = .{},
     shell_integration: configpkg.Config.ShellIntegration = .detect,
     shell_integration_features: configpkg.Config.ShellIntegrationFeatures = .{},
     working_directory: ?[]const u8 = null,
@@ -686,10 +737,6 @@ pub const Config = struct {
 };
 
 const Subprocess = struct {
-    /// If we build with flatpak support then we have to keep track of
-    /// a potential execution on the host.
-    const FlatpakHostCommand = if (build_config.flatpak) internal_os.FlatpakHostCommand else void;
-
     const c = @cImport({
         @cInclude("errno.h");
         @cInclude("signal.h");
@@ -698,7 +745,7 @@ const Subprocess = struct {
 
     arena: std.heap.ArenaAllocator,
     cwd: ?[]const u8,
-    env: EnvMap,
+    env: ?EnvMap,
     args: [][]const u8,
     grid_size: renderer.GridSize,
     screen_size: renderer.ScreenSize,
@@ -716,19 +763,9 @@ const Subprocess = struct {
         errdefer arena.deinit();
         const alloc = arena.allocator();
 
-        // Set our env vars. For Flatpak builds running in Flatpak we don't
-        // inherit our environment because the login shell on the host side
-        // will get it.
-        var env = env: {
-            if (comptime build_config.flatpak) {
-                if (internal_os.isFlatpak()) {
-                    break :env std.process.EnvMap.init(alloc);
-                }
-            }
-
-            break :env try std.process.getEnvMap(alloc);
-        };
-        errdefer env.deinit();
+        // Get our env. If a default env isn't provided by the caller
+        // then we get it ourselves.
+        var env = cfg.env;
 
         // If we have a resources dir then set our env var
         if (cfg.resources_dir) |dir| {
@@ -754,7 +791,7 @@ const Subprocess = struct {
             });
             try env.put("TERMINFO", dir);
         } else {
-            if (comptime builtin.target.isDarwin()) {
+            if (comptime builtin.target.os.tag.isDarwin()) {
                 log.warn("ghostty terminfo not found, using xterm-256color", .{});
                 log.warn("the terminfo SHOULD exist on macos, please ensure", .{});
                 log.warn("you're using a valid app bundle.", .{});
@@ -766,6 +803,13 @@ const Subprocess = struct {
 
         // Add our binary to the path if we can find it.
         ghostty_path: {
+            // Skip this for flatpak since host cannot reach them
+            if ((comptime build_config.flatpak) and
+                internal_os.isFlatpak())
+            {
+                break :ghostty_path;
+            }
+
             var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
             const exe_bin_path = std.fs.selfExePath(&exe_buf) catch |err| {
                 log.warn("failed to get ghostty exe path err={}", .{err});
@@ -800,7 +844,7 @@ const Subprocess = struct {
 
         // On macOS, export additional data directories from our
         // application bundle.
-        if (comptime builtin.target.isDarwin()) darwin: {
+        if (comptime builtin.target.os.tag.isDarwin()) darwin: {
             const resources_dir = cfg.resources_dir orelse break :darwin;
 
             var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -842,34 +886,10 @@ const Subprocess = struct {
         try env.put("TERM_PROGRAM", "ghostty");
         try env.put("TERM_PROGRAM_VERSION", build_config.version_string);
 
-        // When embedding in macOS and running via XCode, XCode injects
-        // a bunch of things that break our shell process. We remove those.
-        if (comptime builtin.target.isDarwin() and build_config.artifact == .lib) {
-            if (env.get("__XCODE_BUILT_PRODUCTS_DIR_PATHS") != null) {
-                env.remove("__XCODE_BUILT_PRODUCTS_DIR_PATHS");
-                env.remove("__XPC_DYLD_LIBRARY_PATH");
-                env.remove("DYLD_FRAMEWORK_PATH");
-                env.remove("DYLD_INSERT_LIBRARIES");
-                env.remove("DYLD_LIBRARY_PATH");
-                env.remove("LD_LIBRARY_PATH");
-                env.remove("SECURITYSESSIONID");
-                env.remove("XPC_SERVICE_NAME");
-            }
-
-            // Remove this so that running `ghostty` within Ghostty works.
-            env.remove("GHOSTTY_MAC_APP");
-        }
-
         // VTE_VERSION is set by gnome-terminal and other VTE-based terminals.
         // We don't want our child processes to think we're running under VTE.
+        // This is not apprt-specific, so we do it here.
         env.remove("VTE_VERSION");
-
-        // Don't leak these GTK environment variables to child processes.
-        if (comptime build_config.app_runtime == .gtk) {
-            env.remove("GDK_DEBUG");
-            env.remove("GDK_DISABLE");
-            env.remove("GSK_RENDERER");
-        }
 
         // Setup our shell integration, if we can.
         const integrated_shell: ?shell_integration.Shell, const shell_command: []const u8 = shell: {
@@ -879,7 +899,11 @@ const Subprocess = struct {
             };
 
             const force: ?shell_integration.Shell = switch (cfg.shell_integration) {
-                .none => break :shell .{ null, default_shell_command },
+                .none => {
+                    // Even if shell integration is none, we still want to set up the feature env vars
+                    try shell_integration.setupFeatures(&env, cfg.shell_integration_features);
+                    break :shell .{ null, default_shell_command };
+                },
                 .detect => null,
                 .bash => .bash,
                 .elvish => .elvish,
@@ -913,6 +937,15 @@ const Subprocess = struct {
             log.warn("shell could not be detected, no automatic shell integration will be injected", .{});
         }
 
+        // Add the environment variables that override any others.
+        {
+            var it = cfg.env_override.iterator();
+            while (it.next()) |entry| try env.put(
+                entry.key_ptr.*,
+                entry.value_ptr.*,
+            );
+        }
+
         // Build our args list
         const args = args: {
             const cap = 9; // the most we'll ever use
@@ -922,7 +955,7 @@ const Subprocess = struct {
             // If we're on macOS, we have to use `login(1)` to get all of
             // the proper environment variables set, a login shell, and proper
             // hushlogin behavior.
-            if (comptime builtin.target.isDarwin()) darwin: {
+            if (comptime builtin.target.os.tag.isDarwin()) darwin: {
                 const passwd = internal_os.passwd.get(alloc) catch |err| {
                     log.warn("failed to read passwd, not using a login shell err={}", .{err});
                     break :darwin;
@@ -975,12 +1008,12 @@ const Subprocess = struct {
                 // which we may not want. If we specify "-l" then we can avoid
                 // this behavior but now the shell isn't a login shell.
                 //
-                // There is another issue: `login(1)` only checks for ".hushlogin"
-                // in the working directory. This means that if we specify "-l"
-                // then we won't get hushlogin honored if its in the home
-                // directory (which is standard). To get around this, we
-                // check for hushlogin ourselves and if present specify the
-                // "-q" flag to login(1).
+                // There is another issue: `login(1)` on macOS 14.3 and earlier
+                // checked for ".hushlogin" in the working directory. This means
+                // that if we specify "-l" then we won't get hushlogin honored
+                // if its in the home directory (which is standard). To get
+                // around this, we check for hushlogin ourselves and if present
+                // specify the "-q" flag to login(1).
                 //
                 // So to get all the behaviors we want, we specify "-l" but
                 // execute "bash" (which is built-in to macOS). We then use
@@ -1077,6 +1110,7 @@ const Subprocess = struct {
     pub fn deinit(self: *Subprocess) void {
         self.stop();
         if (self.pty) |*pty| pty.deinit();
+        if (self.env) |*env| env.deinit();
         self.arena.deinit();
         self.* = undefined;
     }
@@ -1098,6 +1132,10 @@ const Subprocess = struct {
         });
         self.pty = pty;
         errdefer {
+            if (comptime builtin.os.tag != .windows) {
+                _ = posix.close(pty.slave);
+            }
+
             pty.deinit();
             self.pty = null;
         }
@@ -1114,7 +1152,7 @@ const Subprocess = struct {
             // Flatpak command must have a stable pointer.
             self.flatpak_command = .{
                 .argv = self.args,
-                .env = &self.env,
+                .env = if (self.env) |*env| env else null,
                 .stdin = pty.slave,
                 .stdout = pty.slave,
                 .stderr = pty.slave,
@@ -1155,7 +1193,7 @@ const Subprocess = struct {
         var cmd: Command = .{
             .path = self.args[0],
             .args = self.args,
-            .env = &self.env,
+            .env = if (self.env) |*env| env else null,
             .cwd = cwd,
             .stdin = if (builtin.os.tag == .windows) null else .{ .handle = pty.slave },
             .stdout = if (builtin.os.tag == .windows) null else .{ .handle = pty.slave },
@@ -1180,6 +1218,19 @@ const Subprocess = struct {
         log.info("started subcommand path={s} pid={?}", .{ self.args[0], cmd.pid });
         if (comptime builtin.os.tag == .linux) {
             log.info("subcommand cgroup={s}", .{self.linux_cgroup orelse "-"});
+        }
+
+        if (comptime builtin.os.tag != .windows) {
+            // Once our subcommand is started we can close the slave
+            // side. This prevents the slave fd from being leaked to
+            // future children.
+            _ = posix.close(pty.slave);
+        }
+
+        // Successful start we can clear out some memory.
+        if (self.env) |*env| {
+            env.deinit();
+            self.env = null;
         }
 
         self.command = cmd;
@@ -1225,7 +1276,7 @@ const Subprocess = struct {
         }
 
         // Kill our Flatpak command
-        if (FlatpakHostCommand != void) {
+        if (comptime build_config.flatpak) {
             if (self.flatpak_command) |*cmd| {
                 killCommandFlatpak(cmd) catch |err|
                     log.err("error sending SIGHUP to command, may hang: {}", .{err});
@@ -1285,7 +1336,7 @@ const Subprocess = struct {
                         switch (posix.errno(c.killpg(pgid, c.SIGHUP))) {
                             .SUCCESS => log.debug("process group killed pgid={}", .{pgid}),
                             else => |err| killpg: {
-                                if ((comptime builtin.target.isDarwin()) and
+                                if ((comptime builtin.target.os.tag.isDarwin()) and
                                     err == .PERM)
                                 {
                                     log.debug("killpg failed with EPERM, expected on Darwin and ignoring", .{});
@@ -1437,12 +1488,9 @@ pub const ReadThread = struct {
                 };
 
                 // This happens on macOS instead of WouldBlock when the
-                // child process dies. It's equivalent to NotOpenForReading
-                // so we can just exit.
-                if (n == 0) {
-                    log.info("io reader exiting", .{});
-                    return;
-                }
+                // child process dies. To be safe, we just break the loop
+                // and let our poll happen.
+                if (n == 0) break;
 
                 // log.info("DATA: {d}", .{n});
                 @call(.always_inline, termio.Termio.processOutput, .{ io, buf[0..n] });
@@ -1454,9 +1502,16 @@ pub const ReadThread = struct {
                 return;
             };
 
-            // If our quit fd is closed, we're done.
-            if (pollfds[1].revents & posix.POLL.HUP != 0) {
+            // If our quit fd is set, we're done.
+            if (pollfds[1].revents & posix.POLL.IN != 0) {
                 log.info("read thread got quit signal", .{});
+                return;
+            }
+
+            // If our pty fd is closed, then we're also done with our
+            // read thread.
+            if (pollfds[0].revents & posix.POLL.HUP != 0) {
+                log.info("pty fd closed, read thread exiting", .{});
                 return;
             }
         }

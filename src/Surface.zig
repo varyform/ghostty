@@ -24,7 +24,7 @@ const global_state = &@import("global.zig").state;
 const oni = @import("oniguruma");
 const crash = @import("crash/main.zig");
 const unicode = @import("unicode/main.zig");
-const renderer = @import("renderer.zig");
+const rendererpkg = @import("renderer.zig");
 const termio = @import("termio.zig");
 const objc = @import("objc");
 const imgui = @import("imgui");
@@ -36,13 +36,20 @@ const configpkg = @import("config.zig");
 const input = @import("input.zig");
 const App = @import("App.zig");
 const internal_os = @import("os/main.zig");
-const inspector = @import("inspector/main.zig");
+const inspectorpkg = @import("inspector/main.zig");
 const SurfaceMouse = @import("surface_mouse.zig");
 
 const log = std.log.scoped(.surface);
 
 // The renderer implementation to use.
-const Renderer = renderer.Renderer;
+const Renderer = rendererpkg.Renderer;
+
+/// Minimum window size in cells. This is used to prevent the window from
+/// being resized to a size that is too small to be useful. These defaults
+/// are chosen to match the default size of Mac's Terminal.app, but is
+/// otherwise somewhat arbitrary.
+const min_window_width_cells: u32 = 10;
+const min_window_height_cells: u32 = 4;
 
 /// Allocator
 alloc: Allocator,
@@ -63,10 +70,10 @@ font_metrics: font.Metrics,
 renderer: Renderer,
 
 /// The render state
-renderer_state: renderer.State,
+renderer_state: rendererpkg.State,
 
 /// The renderer thread manager
-renderer_thread: renderer.Thread,
+renderer_thread: rendererpkg.Thread,
 
 /// The actual thread
 renderer_thr: std.Thread,
@@ -106,10 +113,10 @@ io_thread: termio.Thread,
 io_thr: std.Thread,
 
 /// Terminal inspector
-inspector: ?*inspector.Inspector = null,
+inspector: ?*inspectorpkg.Inspector = null,
 
 /// All our sizing information.
-size: renderer.Size,
+size: rendererpkg.Size,
 
 /// The configuration derived from the main config. We "derive" it so that
 /// we don't have a shared pointer hanging around that we need to worry about
@@ -252,6 +259,8 @@ const DerivedConfig = struct {
     window_padding_left: u32,
     window_padding_right: u32,
     window_padding_balance: bool,
+    window_height: u32,
+    window_width: u32,
     title: ?[:0]const u8,
     title_report: bool,
     links: []Link,
@@ -313,6 +322,8 @@ const DerivedConfig = struct {
             .window_padding_left = config.@"window-padding-x".top_left,
             .window_padding_right = config.@"window-padding-x".bottom_right,
             .window_padding_balance = config.@"window-padding-balance",
+            .window_height = config.@"window-height",
+            .window_width = config.@"window-width",
             .title = config.title,
             .title_report = config.@"title-report",
             .links = links,
@@ -328,7 +339,7 @@ const DerivedConfig = struct {
         self.arena.deinit();
     }
 
-    fn scaledPadding(self: *const DerivedConfig, x_dpi: f32, y_dpi: f32) renderer.Padding {
+    fn scaledPadding(self: *const DerivedConfig, x_dpi: f32, y_dpi: f32) rendererpkg.Padding {
         const padding_top: u32 = padding_top: {
             const padding_top: f32 = @floatFromInt(self.window_padding_top);
             break :padding_top @intFromFloat(@floor(padding_top * y_dpi / 72));
@@ -419,12 +430,9 @@ pub fn init(
         font_size,
     );
 
-    // Pre-calculate our initial cell size ourselves.
-    const cell_size = font_grid.cellSize();
-
     // Build our size struct which has all the sizes we need.
-    const size: renderer.Size = size: {
-        var size: renderer.Size = .{
+    const size: rendererpkg.Size = size: {
+        var size: rendererpkg.Size = .{
             .screen = screen: {
                 const surface_size = try rt_surface.getSize();
                 break :screen .{
@@ -437,7 +445,7 @@ pub fn init(
             .padding = .{},
         };
 
-        const explicit: renderer.Padding = derived_config.scaledPadding(
+        const explicit: rendererpkg.Padding = derived_config.scaledPadding(
             x_dpi,
             y_dpi,
         );
@@ -467,7 +475,7 @@ pub fn init(
     errdefer alloc.destroy(mutex);
 
     // Create the renderer thread
-    var render_thread = try renderer.Thread.init(
+    var render_thread = try rendererpkg.Thread.init(
         alloc,
         config,
         rt_surface,
@@ -519,9 +527,19 @@ pub fn init(
     // This separate block ({}) is important because our errdefers must
     // be scoped here to be valid.
     {
+        var env = rt_surface.defaultTermioEnv() catch |err| env: {
+            // If an error occurs, we don't want to block surface startup.
+            log.warn("error getting env map for surface err={}", .{err});
+            break :env internal_os.getEnvMap(alloc) catch
+                std.process.EnvMap.init(alloc);
+        };
+        errdefer env.deinit();
+
         // Initialize our IO backend
         var io_exec = try termio.Exec.init(alloc, .{
             .command = command,
+            .env = env,
+            .env_override = config.env,
             .shell_integration = config.@"shell-integration",
             .shell_integration_features = config.@"shell-integration-features",
             .working_directory = config.@"working-directory",
@@ -561,19 +579,13 @@ pub fn init(
     errdefer self.io.deinit();
 
     // Report initial cell size on surface creation
-    try rt_app.performAction(
+    _ = try rt_app.performAction(
         .{ .surface = self },
         .cell_size,
         .{ .width = size.cell.width, .height = size.cell.height },
     );
 
-    // Set a minimum size that is cols=10 h=4. This matches Mac's Terminal.app
-    // but is otherwise somewhat arbitrary.
-
-    const min_window_width_cells: u32 = 10;
-    const min_window_height_cells: u32 = 4;
-
-    try rt_app.performAction(
+    _ = try rt_app.performAction(
         .{ .surface = self },
         .size_limit,
         .{
@@ -599,7 +611,7 @@ pub fn init(
     // Start our renderer thread
     self.renderer_thr = try std.Thread.spawn(
         .{},
-        renderer.Thread.threadMain,
+        rendererpkg.Thread.threadMain,
         .{&self.renderer_thread},
     );
     self.renderer_thr.setName("renderer") catch {};
@@ -619,37 +631,14 @@ pub fn init(
     // Note: it is important to do this after the renderer is setup above.
     // This allows the apprt to fully initialize the surface before we
     // start messing with the window.
-    if (config.@"window-height" > 0 and config.@"window-width" > 0) init: {
-        const scale = rt_surface.getContentScale() catch break :init;
-        const height = @max(config.@"window-height", min_window_height_cells) * cell_size.height;
-        const width = @max(config.@"window-width", min_window_width_cells) * cell_size.width;
-        const width_f32: f32 = @floatFromInt(width);
-        const height_f32: f32 = @floatFromInt(height);
-
-        // The final values are affected by content scale and we need to
-        // account for the padding so we get the exact correct grid size.
-        const final_width: u32 =
-            @as(u32, @intFromFloat(@ceil(width_f32 / scale.x))) +
-            size.padding.left +
-            size.padding.right;
-        const final_height: u32 =
-            @as(u32, @intFromFloat(@ceil(height_f32 / scale.y))) +
-            size.padding.top +
-            size.padding.bottom;
-
-        rt_app.performAction(
-            .{ .surface = self },
-            .initial_size,
-            .{ .width = final_width, .height = final_height },
-        ) catch |err| {
-            // We don't treat this as a fatal error because not setting
-            // an initial size shouldn't stop our terminal from working.
-            log.warn("unable to set initial window size: {s}", .{err});
-        };
-    }
+    self.recomputeInitialSize() catch |err| {
+        // We don't treat this as a fatal error because not setting
+        // an initial size shouldn't stop our terminal from working.
+        log.warn("unable to set initial window size: {}", .{err});
+    };
 
     if (config.title) |title| {
-        try rt_app.performAction(
+        _ = try rt_app.performAction(
             .{ .surface = self },
             .set_title,
             .{ .title = title },
@@ -670,7 +659,7 @@ pub fn init(
                 break :xdg;
             };
             defer alloc.free(title);
-            try rt_app.performAction(
+            _ = try rt_app.performAction(
                 .{ .surface = self },
                 .set_title,
                 .{ .title = title },
@@ -747,9 +736,9 @@ pub fn activateInspector(self: *Surface) !void {
     if (self.inspector != null) return;
 
     // Setup the inspector
-    const ptr = try self.alloc.create(inspector.Inspector);
+    const ptr = try self.alloc.create(inspectorpkg.Inspector);
     errdefer self.alloc.destroy(ptr);
-    ptr.* = try inspector.Inspector.init(self);
+    ptr.* = try inspectorpkg.Inspector.init(self);
     self.inspector = ptr;
 
     // Put the inspector onto the render state
@@ -823,7 +812,7 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
             // We know that our title should end in 0.
             const slice = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(v)), 0);
             log.debug("changing title \"{s}\"", .{slice});
-            try self.rt_app.performAction(
+            _ = try self.rt_app.performAction(
                 .{ .surface = self },
                 .set_title,
                 .{ .title = slice },
@@ -859,7 +848,7 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
         .color_change => |change| {
             // Notify our apprt, but don't send a mode 2031 DSR report
             // because VT sequences were used to change the color.
-            try self.rt_app.performAction(
+            _ = try self.rt_app.performAction(
                 .{ .surface = self },
                 .color_change,
                 .{
@@ -878,7 +867,7 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
 
         .set_mouse_shape => |shape| {
             log.debug("changing mouse shape: {}", .{shape});
-            try self.rt_app.performAction(
+            _ = try self.rt_app.performAction(
                 .{ .surface = self },
                 .mouse_shape,
                 shape,
@@ -910,7 +899,7 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
             const str = try self.alloc.dupeZ(u8, w.slice());
             defer self.alloc.free(str);
 
-            try self.rt_app.performAction(
+            _ = try self.rt_app.performAction(
                 .{ .surface = self },
                 .pwd,
                 .{ .pwd = str },
@@ -961,7 +950,7 @@ fn passwordInput(self: *Surface, v: bool) !void {
     }
 
     // Notify our apprt so it can do whatever it wants.
-    self.rt_app.performAction(
+    _ = self.rt_app.performAction(
         .{ .surface = self },
         .secure_input,
         if (v) .on else .off,
@@ -1041,13 +1030,16 @@ fn mouseRefreshLinks(
     pos_vp: terminal.point.Coordinate,
     over_link: bool,
 ) !void {
+    // If the position is outside our viewport, do nothing
+    if (pos.x < 0 or pos.y < 0) return;
+
     self.mouse.link_point = pos_vp;
 
     if (try self.linkAtPos(pos)) |link| {
         self.renderer_state.mouse.point = pos_vp;
         self.mouse.over_link = true;
         self.renderer_state.terminal.screen.dirty.hyperlink_hover = true;
-        try self.rt_app.performAction(
+        _ = try self.rt_app.performAction(
             .{ .surface = self },
             .mouse_shape,
             .pointer,
@@ -1060,7 +1052,7 @@ fn mouseRefreshLinks(
                     .trim = false,
                 });
                 defer self.alloc.free(str);
-                try self.rt_app.performAction(
+                _ = try self.rt_app.performAction(
                     .{ .surface = self },
                     .mouse_over_link,
                     .{ .url = str },
@@ -1074,7 +1066,7 @@ fn mouseRefreshLinks(
                     log.warn("failed to get URI for OSC8 hyperlink", .{});
                     break :link;
                 };
-                try self.rt_app.performAction(
+                _ = try self.rt_app.performAction(
                     .{ .surface = self },
                     .mouse_over_link,
                     .{ .url = uri },
@@ -1084,12 +1076,12 @@ fn mouseRefreshLinks(
 
         try self.queueRender();
     } else if (over_link) {
-        try self.rt_app.performAction(
+        _ = try self.rt_app.performAction(
             .{ .surface = self },
             .mouse_shape,
             self.io.terminal.mouse_shape,
         );
-        try self.rt_app.performAction(
+        _ = try self.rt_app.performAction(
             .{ .surface = self },
             .mouse_over_link,
             .{ .url = "" },
@@ -1099,9 +1091,9 @@ fn mouseRefreshLinks(
 }
 
 /// Called when our renderer health state changes.
-fn updateRendererHealth(self: *Surface, health: renderer.Health) void {
+fn updateRendererHealth(self: *Surface, health: rendererpkg.Health) void {
     log.warn("renderer health status change status={}", .{health});
-    self.rt_app.performAction(
+    _ = self.rt_app.performAction(
         .{ .surface = self },
         .renderer_health,
         health,
@@ -1113,7 +1105,7 @@ fn updateRendererHealth(self: *Surface, health: renderer.Health) void {
 /// This should be called anytime `config_conditional_state` changes
 /// so that the apprt can reload the configuration.
 fn notifyConfigConditionalState(self: *Surface) void {
-    self.rt_app.performAction(
+    _ = self.rt_app.performAction(
         .{ .surface = self },
         .reload_config,
         .{ .soft = true },
@@ -1171,7 +1163,7 @@ pub fn updateConfig(
 
     // We need to store our configs in a heap-allocated pointer so that
     // our messages aren't huge.
-    var renderer_message = try renderer.Message.initChangeConfig(self.alloc, config);
+    var renderer_message = try rendererpkg.Message.initChangeConfig(self.alloc, config);
     errdefer renderer_message.deinit();
     var termio_config_ptr = try self.alloc.create(termio.Termio.DerivedConfig);
     errdefer self.alloc.destroy(termio_config_ptr);
@@ -1193,18 +1185,65 @@ pub fn updateConfig(
 
     // If we have a title set then we update our window to have the
     // newly configured title.
-    if (config.title) |title| try self.rt_app.performAction(
+    if (config.title) |title| _ = try self.rt_app.performAction(
         .{ .surface = self },
         .set_title,
         .{ .title = title },
     );
 
     // Notify the window
-    try self.rt_app.performAction(
+    _ = try self.rt_app.performAction(
         .{ .surface = self },
         .config_change,
         .{ .config = config },
     );
+}
+
+const InitialSizeError = error{
+    ContentScaleUnavailable,
+    AppActionFailed,
+};
+
+/// Recalculate the initial size of the window based on the
+/// configuration and invoke the apprt `initial_size` action if
+/// necessary.
+fn recomputeInitialSize(
+    self: *Surface,
+) InitialSizeError!void {
+    // Both width and height must be set for this to work, as
+    // documented on the config options.
+    if (self.config.window_height <= 0 or
+        self.config.window_width <= 0) return;
+
+    const scale = self.rt_surface.getContentScale() catch
+        return error.ContentScaleUnavailable;
+    const height = @max(
+        self.config.window_height,
+        min_window_height_cells,
+    ) * self.size.cell.height;
+    const width = @max(
+        self.config.window_width,
+        min_window_width_cells,
+    ) * self.size.cell.width;
+    const width_f32: f32 = @floatFromInt(width);
+    const height_f32: f32 = @floatFromInt(height);
+
+    // The final values are affected by content scale and we need to
+    // account for the padding so we get the exact correct grid size.
+    const final_width: u32 =
+        @as(u32, @intFromFloat(@ceil(width_f32 / scale.x))) +
+        self.size.padding.left +
+        self.size.padding.right;
+    const final_height: u32 =
+        @as(u32, @intFromFloat(@ceil(height_f32 / scale.y))) +
+        self.size.padding.top +
+        self.size.padding.bottom;
+
+    _ = self.rt_app.performAction(
+        .{ .surface = self },
+        .initial_size,
+        .{ .width = final_width, .height = final_height },
+    ) catch return error.AppActionFailed;
 }
 
 /// Returns true if the terminal has a selection.
@@ -1316,8 +1355,8 @@ pub fn imePoint(self: *const Surface) apprt.IMEPos {
     const content_scale = self.rt_surface.getContentScale() catch .{ .x = 1, .y = 1 };
 
     const x: f64 = x: {
-        // Simple x * cell width gives the top-left corner
-        var x: f64 = @floatFromInt(cursor.x * self.size.cell.width);
+        // Simple x * cell width gives the top-left corner, then add padding offset
+        var x: f64 = @floatFromInt(cursor.x * self.size.cell.width + self.size.padding.left);
 
         // We want the midpoint
         x += @as(f64, @floatFromInt(self.size.cell.width)) / 2;
@@ -1329,8 +1368,8 @@ pub fn imePoint(self: *const Surface) apprt.IMEPos {
     };
 
     const y: f64 = y: {
-        // Simple x * cell width gives the top-left corner
-        var y: f64 = @floatFromInt(cursor.y * self.size.cell.height);
+        // Simple y * cell height gives the top-left corner, then add padding offset
+        var y: f64 = @floatFromInt(cursor.y * self.size.cell.height + self.size.padding.top);
 
         // We want the bottom
         y += @floatFromInt(self.size.cell.height);
@@ -1458,7 +1497,7 @@ fn setSelection(self: *Surface, sel_: ?terminal.Selection) !void {
 
 /// Change the cell size for the terminal grid. This can happen as
 /// a result of changing the font size at runtime.
-fn setCellSize(self: *Surface, size: renderer.CellSize) !void {
+fn setCellSize(self: *Surface, size: rendererpkg.CellSize) !void {
     // Update our cell size within our size struct
     self.size.cell = size;
     self.balancePaddingIfNeeded();
@@ -1466,8 +1505,15 @@ fn setCellSize(self: *Surface, size: renderer.CellSize) !void {
     // Notify the terminal
     self.io.queueMessage(.{ .resize = self.size }, .unlocked);
 
+    // Update our terminal default size if necessary.
+    self.recomputeInitialSize() catch |err| {
+        // We don't treat this as a fatal error because not setting
+        // an initial size shouldn't stop our terminal from working.
+        log.warn("unable to recompute initial window size: {}", .{err});
+    };
+
     // Notify the window
-    try self.rt_app.performAction(
+    _ = try self.rt_app.performAction(
         .{ .surface = self },
         .cell_size,
         .{ .width = size.width, .height = size.height },
@@ -1527,7 +1573,7 @@ pub fn sizeCallback(self: *Surface, size: apprt.SurfaceSize) !void {
     crash.sentry.thread_state = self.crashThreadState();
     defer crash.sentry.thread_state = null;
 
-    const new_screen_size: renderer.ScreenSize = .{
+    const new_screen_size: rendererpkg.ScreenSize = .{
         .width = size.width,
         .height = size.height,
     };
@@ -1540,7 +1586,7 @@ pub fn sizeCallback(self: *Surface, size: apprt.SurfaceSize) !void {
     try self.resize(new_screen_size);
 }
 
-fn resize(self: *Surface, size: renderer.ScreenSize) !void {
+fn resize(self: *Surface, size: rendererpkg.ScreenSize) !void {
     // Save our screen size
     self.size.screen = size;
     self.balancePaddingIfNeeded();
@@ -1591,6 +1637,15 @@ pub fn preeditCallback(self: *Surface, preedit_: ?[]const u8) !void {
     self.renderer_state.mutex.lock();
     defer self.renderer_state.mutex.unlock();
 
+    // We clear our selection when ANY OF:
+    // 1. We have an existing preedit
+    // 2. We have preedit text
+    if (self.renderer_state.preedit != null or
+        preedit_ != null)
+    {
+        self.setSelection(null) catch {};
+    }
+
     // We always clear our prior preedit
     if (self.renderer_state.preedit) |p| {
         self.alloc.free(p.codepoints);
@@ -1612,7 +1667,7 @@ pub fn preeditCallback(self: *Surface, preedit_: ?[]const u8) !void {
     var it = view.iterator();
 
     // Allocate the codepoints slice
-    const Codepoint = renderer.State.Preedit.Codepoint;
+    const Codepoint = rendererpkg.State.Preedit.Codepoint;
     var codepoints: std.ArrayListUnmanaged(Codepoint) = .{};
     defer codepoints.deinit(self.alloc);
     while (it.nextCodepoint()) |cp| {
@@ -1679,7 +1734,7 @@ pub fn keyCallback(
     defer crash.sentry.thread_state = null;
 
     // Setup our inspector event if we have an inspector.
-    var insp_ev: ?inspector.key.Event = if (self.inspector != null) ev: {
+    var insp_ev: ?inspectorpkg.key.Event = if (self.inspector != null) ev: {
         var copy = event;
         copy.utf8 = "";
         if (event.utf8.len > 0) copy.utf8 = try self.alloc.dupe(u8, event.utf8);
@@ -1754,12 +1809,12 @@ pub fn keyCallback(
             };
         } else if (self.io.terminal.flags.mouse_event != .none and !self.mouse.mods.shift) {
             // If we have mouse reports on and we don't have shift pressed, we reset state
-            try self.rt_app.performAction(
+            _ = try self.rt_app.performAction(
                 .{ .surface = self },
                 .mouse_shape,
                 self.io.terminal.mouse_shape,
             );
-            try self.rt_app.performAction(
+            _ = try self.rt_app.performAction(
                 .{ .surface = self },
                 .mouse_over_link,
                 .{ .url = "" },
@@ -1777,7 +1832,7 @@ pub fn keyCallback(
         .mods = self.mouse.mods,
         .over_link = self.mouse.over_link,
         .hidden = self.mouse.hidden,
-    }).keyToMouseShape()) |shape| try self.rt_app.performAction(
+    }).keyToMouseShape()) |shape| _ = try self.rt_app.performAction(
         .{ .surface = self },
         .mouse_shape,
         shape,
@@ -1843,7 +1898,7 @@ pub fn keyCallback(
 fn maybeHandleBinding(
     self: *Surface,
     event: input.KeyEvent,
-    insp_ev: ?*inspector.key.Event,
+    insp_ev: ?*inspectorpkg.key.Event,
 ) !?InputEffect {
     switch (event.action) {
         // Release events never trigger a binding but we need to check if
@@ -1902,7 +1957,7 @@ fn maybeHandleBinding(
             }
 
             // Start or continue our key sequence
-            self.rt_app.performAction(
+            _ = self.rt_app.performAction(
                 .{ .surface = self },
                 .key_sequence,
                 .{ .trigger = entry.key_ptr.* },
@@ -2011,7 +2066,7 @@ fn endKeySequence(
     mem: KeySequenceMemory,
 ) void {
     // Notify apprt key sequence ended
-    self.rt_app.performAction(
+    _ = self.rt_app.performAction(
         .{ .surface = self },
         .key_sequence,
         .end,
@@ -2051,7 +2106,7 @@ fn endKeySequence(
 fn encodeKey(
     self: *Surface,
     event: input.KeyEvent,
-    insp_ev: ?*inspector.key.Event,
+    insp_ev: ?*inspectorpkg.key.Event,
 ) !?termio.Message.WriteReq {
     // Build up our encoder. Under different modes and
     // inputs there are many keybindings that result in no encoding
@@ -2293,31 +2348,18 @@ pub fn scrollCallback(
     if (self.mouse.hidden) self.showMouse();
 
     const y: ScrollAmount = if (yoff == 0) .{} else y: {
-        // Non-precision scrolling is easy to calculate. We don't use
-        // the given offset at all and instead just treat a positive
-        // as a scroll up and a negative as a scroll down and scroll in
-        // steps.
-        if (!scroll_mods.precision) {
-            // Calculate our magnitude of scroll. This is constant (not
-            // dependent on yoff).
-            const grid_size = self.size.grid();
-            const grid_rows_f64: f64 = @floatFromInt(grid_size.rows);
-            const y_delta_f64: f64 = @round((grid_rows_f64 * self.config.mouse_scroll_multiplier) / 15.0);
-            const y_delta_usize: usize = @max(1, @as(usize, @intFromFloat(y_delta_f64)));
+        // We use cell_size to determine if we have accumulated enough to trigger a scroll
+        const cell_size: f64 = @floatFromInt(self.size.cell.height);
 
-            // Calculate our direction of scroll based on the sign of yoff.
-            const y_sign: isize = if (yoff >= 0) 1 else -1;
-            const y_delta_isize: isize = y_sign * @as(isize, @intCast(y_delta_usize));
-
-            break :y .{ .delta = y_delta_isize };
-        }
-
-        // Precision scrolling is more complicated. We need to maintain state
-        // to build up a pending scroll amount if we're only scrolling by a
-        // tiny amount so that we can scroll by a full row when we have enough.
-
-        // Adjust our offset by the multiplier
-        const yoff_adjusted: f64 = yoff * self.config.mouse_scroll_multiplier;
+        // If we have precision scroll, yoff is the number of pixels to scroll. In non-precision
+        // scroll, yoff is the number of wheel ticks. Some mice are capable of reporting fractional
+        // wheel ticks, which don't necessarily get reported as precision scrolls. We normalize all
+        // scroll events to pixels by multiplying the wheel tick value and the cell size. This means
+        // that a wheel tick of 1 results in single scroll event.
+        const yoff_adjusted: f64 = if (scroll_mods.precision)
+            yoff
+        else
+            yoff * cell_size * self.config.mouse_scroll_multiplier;
 
         // Add our previously saved pending amount to the offset to get the
         // new offset value. The signs of the pending and yoff should match
@@ -2328,7 +2370,6 @@ pub fn scrollCallback(
 
         // If the new offset is less than a single unit of scroll, we save
         // the new pending value and do not scroll yet.
-        const cell_size: f64 = @floatFromInt(self.size.cell.height);
         if (@abs(poff) < cell_size) {
             self.mouse.pending_scroll_y = poff;
             break :y .{};
@@ -2349,15 +2390,11 @@ pub fn scrollCallback(
     // For detailed comments see the y calculation above.
     const x: ScrollAmount = if (xoff == 0) .{} else x: {
         if (!scroll_mods.precision) {
-            const x_delta_f64: f64 = @round(1 * self.config.mouse_scroll_multiplier);
-            const x_delta_usize: usize = @max(1, @as(usize, @intFromFloat(x_delta_f64)));
-            const x_sign: isize = if (xoff >= 0) 1 else -1;
-            const x_delta_isize: isize = x_sign * @as(isize, @intCast(x_delta_usize));
+            const x_delta_isize: isize = @intFromFloat(@round(xoff));
             break :x .{ .delta = x_delta_isize };
         }
 
-        const xoff_adjusted: f64 = xoff * self.config.mouse_scroll_multiplier;
-        const poff: f64 = self.mouse.pending_scroll_x + xoff_adjusted;
+        const poff: f64 = self.mouse.pending_scroll_x + xoff;
         const cell_size: f64 = @floatFromInt(self.size.cell.width);
         if (@abs(poff) < cell_size) {
             self.mouse.pending_scroll_x = poff;
@@ -2692,7 +2729,7 @@ fn mouseReport(
             const final: u8 = if (action == .release) 'm' else 'M';
 
             // The position has to be adjusted to the terminal space.
-            const coord: renderer.Coordinate.Terminal = (renderer.Coordinate{
+            const coord: rendererpkg.Coordinate.Terminal = (rendererpkg.Coordinate{
                 .surface = .{
                     .x = pos.x,
                     .y = pos.y,
@@ -3347,12 +3384,12 @@ pub fn cursorPosCallback(
         self.mouse.link_point = null;
         if (self.mouse.over_link) {
             self.mouse.over_link = false;
-            try self.rt_app.performAction(
+            _ = try self.rt_app.performAction(
                 .{ .surface = self },
                 .mouse_shape,
                 self.io.terminal.mouse_shape,
             );
-            try self.rt_app.performAction(
+            _ = try self.rt_app.performAction(
                 .{ .surface = self },
                 .mouse_over_link,
                 .{ .url = "" },
@@ -3554,22 +3591,21 @@ fn dragLeftClickTriple(
     const screen = &self.io.terminal.screen;
     const click_pin = self.mouse.left_click_pin.?.*;
 
-    // Get the word under our current point. If there isn't a word, do nothing.
-    const word = screen.selectLine(.{ .pin = drag_pin }) orelse return;
+    // Get the line selection under our current drag point. If there isn't a
+    // line, do nothing.
+    const line = screen.selectLine(.{ .pin = drag_pin }) orelse return;
 
-    // Get our selection to grow it. If we don't have a selection, start it now.
-    // We may not have a selection if we started our dbl-click in an area
-    // that had no data, then we dragged our mouse into an area with data.
-    var sel = screen.selectLine(.{ .pin = click_pin }) orelse {
-        try self.setSelection(word);
-        return;
-    };
+    // Get the selection under our click point. We first try to trim
+    // whitespace if we've selected a word. But if no word exists then
+    // we select the blank line.
+    const sel_ = screen.selectLine(.{ .pin = click_pin }) orelse
+        screen.selectLine(.{ .pin = click_pin, .whitespace = null });
 
-    // Grow our selection
+    var sel = sel_ orelse return;
     if (drag_pin.before(click_pin)) {
-        sel.startPtr().* = word.start();
+        sel.startPtr().* = line.start();
     } else {
-        sel.endPtr().* = word.end();
+        sel.endPtr().* = line.end();
     }
     try self.setSelection(sel);
 }
@@ -3763,7 +3799,7 @@ pub fn colorSchemeCallback(self: *Surface, scheme: apprt.ColorScheme) !void {
 
 pub fn posToViewport(self: Surface, xpos: f64, ypos: f64) terminal.point.Coordinate {
     // Get our grid cell
-    const coord: renderer.Coordinate = .{ .surface = .{ .x = xpos, .y = ypos } };
+    const coord: rendererpkg.Coordinate = .{ .surface = .{ .x = xpos, .y = ypos } };
     const grid = coord.convert(.grid, self.size).grid;
     return .{ .x = grid.x, .y = grid.y };
 }
@@ -3779,7 +3815,7 @@ fn scrollToBottom(self: *Surface) !void {
 fn hideMouse(self: *Surface) void {
     if (self.mouse.hidden) return;
     self.mouse.hidden = true;
-    self.rt_app.performAction(
+    _ = self.rt_app.performAction(
         .{ .surface = self },
         .mouse_visibility,
         .hidden,
@@ -3791,7 +3827,7 @@ fn hideMouse(self: *Surface) void {
 fn showMouse(self: *Surface) void {
     if (!self.mouse.hidden) return;
     self.mouse.hidden = false;
-    self.rt_app.performAction(
+    _ = self.rt_app.performAction(
         .{ .surface = self },
         .mouse_visibility,
         .visible,
@@ -4004,6 +4040,12 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             try self.setFontSize(size);
         },
 
+        .prompt_surface_title => return try self.rt_app.performAction(
+            .{ .surface = self },
+            .prompt_title,
+            {},
+        ),
+
         .clear_screen => {
             // This is a duplicate of some of the logic in termio.clearScreen
             // but we need to do this here so we can know the answer before
@@ -4082,13 +4124,13 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             v,
         ),
 
-        .new_tab => try self.rt_app.performAction(
+        .new_tab => return try self.rt_app.performAction(
             .{ .surface = self },
             .new_tab,
             {},
         ),
 
-        .close_tab => try self.rt_app.performAction(
+        .close_tab => return try self.rt_app.performAction(
             .{ .surface = self },
             .close_tab,
             {},
@@ -4098,7 +4140,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
         .next_tab,
         .last_tab,
         .goto_tab,
-        => |v, tag| try self.rt_app.performAction(
+        => |v, tag| return try self.rt_app.performAction(
             .{ .surface = self },
             .goto_tab,
             switch (tag) {
@@ -4110,13 +4152,13 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             },
         ),
 
-        .move_tab => |position| try self.rt_app.performAction(
+        .move_tab => |position| return try self.rt_app.performAction(
             .{ .surface = self },
             .move_tab,
             .{ .amount = position },
         ),
 
-        .new_split => |direction| try self.rt_app.performAction(
+        .new_split => |direction| return try self.rt_app.performAction(
             .{ .surface = self },
             .new_split,
             switch (direction) {
@@ -4131,7 +4173,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             },
         ),
 
-        .goto_split => |direction| try self.rt_app.performAction(
+        .goto_split => |direction| return try self.rt_app.performAction(
             .{ .surface = self },
             .goto_split,
             switch (direction) {
@@ -4142,7 +4184,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             },
         ),
 
-        .resize_split => |value| try self.rt_app.performAction(
+        .resize_split => |value| return try self.rt_app.performAction(
             .{ .surface = self },
             .resize_split,
             .{
@@ -4156,41 +4198,54 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             },
         ),
 
-        .equalize_splits => try self.rt_app.performAction(
+        .equalize_splits => return try self.rt_app.performAction(
             .{ .surface = self },
             .equalize_splits,
             {},
         ),
 
-        .toggle_split_zoom => try self.rt_app.performAction(
+        .toggle_split_zoom => return try self.rt_app.performAction(
             .{ .surface = self },
             .toggle_split_zoom,
             {},
         ),
 
-        .toggle_fullscreen => try self.rt_app.performAction(
+        .reset_window_size => return try self.rt_app.performAction(
+            .{ .surface = self },
+            .reset_window_size,
+            {},
+        ),
+
+        .toggle_maximize => return try self.rt_app.performAction(
+            .{ .surface = self },
+            .toggle_maximize,
+            {},
+        ),
+
+        .toggle_fullscreen => return try self.rt_app.performAction(
             .{ .surface = self },
             .toggle_fullscreen,
             switch (self.config.macos_non_native_fullscreen) {
                 .false => .native,
                 .true => .macos_non_native,
                 .@"visible-menu" => .macos_non_native_visible_menu,
+                .@"padded-notch" => .macos_non_native_padded_notch,
             },
         ),
 
-        .toggle_window_decorations => try self.rt_app.performAction(
+        .toggle_window_decorations => return try self.rt_app.performAction(
             .{ .surface = self },
             .toggle_window_decorations,
             {},
         ),
 
-        .toggle_tab_overview => try self.rt_app.performAction(
+        .toggle_tab_overview => return try self.rt_app.performAction(
             .{ .surface = self },
             .toggle_tab_overview,
             {},
         ),
 
-        .toggle_secure_input => try self.rt_app.performAction(
+        .toggle_secure_input => return try self.rt_app.performAction(
             .{ .surface = self },
             .secure_input,
             .toggle,
@@ -4204,7 +4259,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             }
         },
 
-        .inspector => |mode| try self.rt_app.performAction(
+        .inspector => |mode| return try self.rt_app.performAction(
             .{ .surface = self },
             .inspector,
             switch (mode) {
@@ -4217,7 +4272,11 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
 
         .close_surface => self.close(),
 
-        .close_window => self.app.closeSurface(self),
+        .close_window => return try self.rt_app.performAction(
+            .{ .surface = self },
+            .close_window,
+            {},
+        ),
 
         .crash => |location| switch (location) {
             .main => @panic("crash binding action, crashing intentionally"),
@@ -4651,7 +4710,7 @@ fn showDesktopNotification(self: *Surface, title: [:0]const u8, body: [:0]const 
 
     self.app.last_notification_time = now;
     self.app.last_notification_digest = new_digest;
-    try self.rt_app.performAction(
+    _ = try self.rt_app.performAction(
         .{ .surface = self },
         .desktop_notification,
         .{
@@ -4671,7 +4730,7 @@ fn crashThreadState(self: *Surface) crash.sentry.ThreadState {
 /// Tell the surface to present itself to the user. This may involve raising the
 /// window and switching tabs.
 fn presentSurface(self: *Surface) !void {
-    try self.rt_app.performAction(
+    _ = try self.rt_app.performAction(
         .{ .surface = self },
         .present_terminal,
         {},

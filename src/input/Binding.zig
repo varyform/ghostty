@@ -236,9 +236,9 @@ pub const Action = union(enum) {
     /// Send an `ESC` sequence.
     esc: []const u8,
 
-    // Send the given text. Uses Zig string literal syntax. This is currently
-    // not validated. If the text is invalid (i.e. contains an invalid escape
-    // sequence), the error will currently only show up in logs.
+    /// Send the given text. Uses Zig string literal syntax. This is currently
+    /// not validated. If the text is invalid (i.e. contains an invalid escape
+    /// sequence), the error will currently only show up in logs.
     text: []const u8,
 
     /// Send data to the pty depending on whether cursor key mode is enabled
@@ -284,8 +284,15 @@ pub const Action = union(enum) {
     scroll_page_fractional: f32,
     scroll_page_lines: i16,
 
-    /// Adjust an existing selection in a given direction. This action
-    /// does nothing if there is no active selection.
+    /// Adjust the current selection in a given direction. Does nothing if no
+    /// selection exists.
+    ///
+    /// Arguments:
+    ///   - left, right, up, down, page_up, page_down, home, end,
+    ///     beginning_of_line, end_of_line
+    ///
+    /// Example: Extend selection to the right
+    ///   keybind = shift+right=adjust_selection:right
     adjust_selection: AdjustSelection,
 
     /// Jump the viewport forward or back by prompt. Positive number is the
@@ -341,8 +348,16 @@ pub const Action = union(enum) {
     /// This only works with libadwaita enabled currently.
     toggle_tab_overview: void,
 
-    /// Create a new split in the given direction. The new split will appear in
-    /// the direction given. For example `new_split:up`. Valid values are left, right, up, down and auto.
+    /// Change the title of the current focused surface via a prompt.
+    prompt_surface_title: void,
+
+    /// Create a new split in the given direction.
+    ///
+    /// Arguments:
+    ///   - right, down, left, up, auto (splits along the larger direction)
+    ///
+    /// Example: Create split on the right
+    ///   keybind = cmd+shift+d=new_split:right
     new_split: SplitDirection,
 
     /// Focus on a split in a given direction. For example `goto_split:up`.
@@ -352,15 +367,31 @@ pub const Action = union(enum) {
     /// zoom/unzoom the current split.
     toggle_split_zoom: void,
 
-    /// Resize the current split by moving the split divider in the given
-    /// direction. For example `resize_split:left,10`. The valid directions are up, down, left and right.
+    /// Resize the current split in a given direction.
+    ///
+    /// Arguments:
+    ///   - up, down, left, right
+    ///   - the number of pixels to resize the split by
+    ///
+    /// Example: Move divider up 10 pixels
+    ///   keybind = cmd+shift+up=resize_split:up,10
     resize_split: SplitResizeParameter,
 
     /// Equalize all splits in the current window
     equalize_splits: void,
 
-    /// Show, hide, or toggle the terminal inspector for the currently focused
-    /// terminal.
+    /// Reset the window to the default size. The "default size" is the
+    /// size that a new window would be created with. This has no effect
+    /// if the window is fullscreen.
+    reset_window_size: void,
+
+    /// Control the terminal inspector visibility.
+    ///
+    /// Arguments:
+    ///   - toggle, show, hide
+    ///
+    /// Example: Toggle inspector visibility
+    ///   keybind = cmd+i=inspector:toggle
     inspector: InspectorMode,
 
     /// Open the configuration file in the default OS editor. If your default OS
@@ -391,6 +422,9 @@ pub const Action = union(enum) {
     /// This only works for macOS currently.
     close_all_windows: void,
 
+    /// Toggle maximized window state. This only works on Linux.
+    toggle_maximize: void,
+
     /// Toggle fullscreen mode of window.
     toggle_fullscreen: void,
 
@@ -416,7 +450,7 @@ pub const Action = union(enum) {
     /// is preserved between appearances, so you can always press the keybinding
     /// to bring it back up.
     ///
-    /// To enable the quick terminally globally so that Ghostty doesn't
+    /// To enable the quick terminal globally so that Ghostty doesn't
     /// have to be focused, prefix your keybind with `global`. Example:
     ///
     /// ```ini
@@ -437,14 +471,24 @@ pub const Action = union(enum) {
     /// See the various configurations for the quick terminal in the
     /// configuration file to customize its behavior.
     ///
-    /// This currently only works on macOS.
+    /// Supported on macOS and some desktop environments on Linux, namely
+    /// those that support the `wlr-layer-shell` Wayland protocol
+    /// (i.e. most desktop environments and window managers except GNOME).
+    ///
+    /// Slide-in animations on Linux are only supported on KDE when the
+    /// "Sliding Popups" KWin plugin is enabled. If you do not have this
+    /// plugin enabled, open System Settings > Apps & Windows > Window
+    /// Management > Desktop Effects, and enable the plugin in the plugin list.
+    /// Ghostty would then need to be restarted for this to take effect.
     toggle_quick_terminal: void,
 
     /// Show/hide all windows. If all windows become shown, we also ensure
-    /// Ghostty is focused.
+    /// Ghostty becomes focused. When hiding all windows, focus is yielded
+    /// to the next application as determined by the OS.
     ///
-    /// This currently only works on macOS. When hiding all windows, we do
-    /// not yield focus to the previous application.
+    /// Note: When the focused surface is fullscreen, this method does nothing.
+    ///
+    /// This currently only works on macOS.
     toggle_visibility: void,
 
     /// Quit ghostty.
@@ -466,7 +510,7 @@ pub const Action = union(enum) {
     ///
     crash: CrashThread,
 
-    pub const Key = @typeInfo(Action).Union.tag_type.?;
+    pub const Key = @typeInfo(Action).@"union".tag_type.?;
 
     pub const CrashThread = enum {
         main,
@@ -513,7 +557,6 @@ pub const Action = union(enum) {
     pub const SplitFocusDirection = enum {
         previous,
         next,
-
         up,
         left,
         down,
@@ -595,17 +638,22 @@ pub const Action = union(enum) {
         const field_info = @typeInfo(field.type);
 
         // Fields can provide a custom "parse" function
-        if (field_info == .Struct or field_info == .Union or field_info == .Enum) {
-            if (@hasDecl(field.type, "parse") and @typeInfo(@TypeOf(field.type.parse)) == .Fn) {
+        if (field_info == .@"struct" or
+            field_info == .@"union" or
+            field_info == .@"enum")
+        {
+            if (@hasDecl(field.type, "parse") and
+                @typeInfo(@TypeOf(field.type.parse)) == .@"fn")
+            {
                 return field.type.parse(param);
             }
         }
 
         return switch (field_info) {
-            .Enum => try parseEnum(field.type, param),
-            .Int => try parseInt(field.type, param),
-            .Float => try parseFloat(field.type, param),
-            .Struct => |info| blk: {
+            .@"enum" => try parseEnum(field.type, param),
+            .int => try parseInt(field.type, param),
+            .float => try parseFloat(field.type, param),
+            .@"struct" => |info| blk: {
                 // Only tuples are supported to avoid ambiguity with field
                 // ordering
                 comptime assert(info.is_tuple);
@@ -615,9 +663,9 @@ pub const Action = union(enum) {
                 inline for (info.fields) |field_| {
                     const next = it.next() orelse return Error.InvalidFormat;
                     @field(value, field_.name) = switch (@typeInfo(field_.type)) {
-                        .Enum => try parseEnum(field_.type, next),
-                        .Int => try parseInt(field_.type, next),
-                        .Float => try parseFloat(field_.type, next),
+                        .@"enum" => try parseEnum(field_.type, next),
+                        .int => try parseInt(field_.type, next),
+                        .float => try parseFloat(field_.type, next),
                         else => unreachable,
                     };
                 }
@@ -645,7 +693,7 @@ pub const Action = union(enum) {
         // An action name is always required
         if (action.len == 0) return Error.InvalidFormat;
 
-        const actionInfo = @typeInfo(Action).Union;
+        const actionInfo = @typeInfo(Action).@"union";
         inline for (actionInfo.fields) |field| {
             if (std.mem.eql(u8, action, field.name)) {
                 // If the field type is void we expect no value
@@ -721,6 +769,7 @@ pub const Action = union(enum) {
             .increase_font_size,
             .decrease_font_size,
             .reset_font_size,
+            .prompt_surface_title,
             .clear_screen,
             .select_all,
             .scroll_to_top,
@@ -737,9 +786,11 @@ pub const Action = union(enum) {
             .close_surface,
             .close_tab,
             .close_window,
+            .toggle_maximize,
             .toggle_fullscreen,
             .toggle_window_decorations,
             .toggle_secure_input,
+            .reset_window_size,
             .crash,
             => .surface,
 
@@ -767,7 +818,9 @@ pub const Action = union(enum) {
     /// Returns a union type that only contains actions that are scoped to
     /// the given scope.
     pub fn Scoped(comptime s: Scope) type {
-        const all_fields = @typeInfo(Action).Union.fields;
+        @setEvalBranchQuota(100_000);
+
+        const all_fields = @typeInfo(Action).@"union".fields;
 
         // Find all fields that are app-scoped
         var i: usize = 0;
@@ -783,9 +836,9 @@ pub const Action = union(enum) {
         }
 
         // Build our union
-        return @Type(.{ .Union = .{
+        return @Type(.{ .@"union" = .{
             .layout = .auto,
-            .tag_type = @Type(.{ .Enum = .{
+            .tag_type = @Type(.{ .@"enum" = .{
                 .tag_type = std.math.IntFittingRange(0, i),
                 .fields = enum_fields[0..i],
                 .decls = &.{},
@@ -857,10 +910,10 @@ pub const Action = union(enum) {
             void => {},
             []const u8 => try writer.print("{s}", .{value}),
             else => switch (value_info) {
-                .Enum => try writer.print("{s}", .{@tagName(value)}),
-                .Float => try writer.print("{d}", .{value}),
-                .Int => try writer.print("{d}", .{value}),
-                .Struct => |info| if (!info.is_tuple) {
+                .@"enum" => try writer.print("{s}", .{@tagName(value)}),
+                .float => try writer.print("{d}", .{value}),
+                .int => try writer.print("{d}", .{value}),
+                .@"struct" => |info| if (!info.is_tuple) {
                     try writer.print("{} (not configurable)", .{value});
                 } else {
                     inline for (info.fields, 0..) |field, i| {
@@ -891,21 +944,21 @@ pub const Action = union(enum) {
         value: anytype,
     ) Allocator.Error!@TypeOf(value) {
         return switch (@typeInfo(@TypeOf(value))) {
-            .Void,
-            .Int,
-            .Float,
-            .Enum,
+            .void,
+            .int,
+            .float,
+            .@"enum",
             => value,
 
-            .Pointer => |info| slice: {
-                comptime assert(info.size == .Slice);
+            .pointer => |info| slice: {
+                comptime assert(info.size == .slice);
                 break :slice try alloc.dupe(
                     info.child,
                     value,
                 );
             },
 
-            .Struct => |info| if (info.is_tuple)
+            .@"struct" => |info| if (info.is_tuple)
                 value
             else
                 try value.clone(alloc),
@@ -928,7 +981,7 @@ pub const Action = union(enum) {
     /// Hash the action into the given hasher.
     fn hashIncremental(self: Action, hasher: anytype) void {
         // Always has the active tag.
-        const Tag = @typeInfo(Action).Union.tag_type.?;
+        const Tag = @typeInfo(Action).@"union".tag_type.?;
         std.hash.autoHash(hasher, @as(Tag, self));
 
         // Hash the value of the field.
@@ -1035,7 +1088,7 @@ pub const Trigger = struct {
             if (part.len == 0) return Error.InvalidFormat;
 
             // Check if its a modifier
-            const modsInfo = @typeInfo(key.Mods).Struct;
+            const modsInfo = @typeInfo(key.Mods).@"struct";
             inline for (modsInfo.fields) |field| {
                 if (field.type == bool) {
                     if (std.mem.eql(u8, part, field.name)) {
@@ -1070,7 +1123,7 @@ pub const Trigger = struct {
             const key_part = if (physical) part[physical_prefix.len..] else part;
 
             // Check if its a key
-            const keysInfo = @typeInfo(key.Key).Enum;
+            const keysInfo = @typeInfo(key.Key).@"enum";
             inline for (keysInfo.fields) |field| {
                 if (!std.mem.eql(u8, field.name, "invalid")) {
                     if (std.mem.eql(u8, key_part, field.name)) {
@@ -1204,6 +1257,13 @@ pub const Set = struct {
     /// This is a conscious decision since the primary use case of the reverse
     /// map is to support GUI toolkit keyboard accelerators and no mainstream
     /// GUI toolkit supports sequences.
+    ///
+    /// Performable triggers are also not present in the reverse map. This
+    /// is so that GUI toolkits don't register performable triggers as
+    /// menu shortcuts (the primary use case of the reverse map). GUI toolkits
+    /// such as GTK handle menu shortcuts too early in the event lifecycle
+    /// for performable to work so this is a conscious decision to ease the
+    /// integration with GUI toolkits.
     reverse: ReverseMap = .{},
 
     /// The entry type for the forward mapping of trigger to action.
@@ -1468,6 +1528,11 @@ pub const Set = struct {
         // unbind should never go into the set, it should be handled prior
         assert(action != .unbind);
 
+        // This is true if we're going to track this entry as
+        // a reverse mapping. There are certain scenarios we don't.
+        // See the reverse map docs for more information.
+        const track_reverse: bool = !flags.performable;
+
         const gop = try self.bindings.getOrPut(alloc, t);
 
         if (gop.found_existing) switch (gop.value_ptr.*) {
@@ -1479,7 +1544,7 @@ pub const Set = struct {
 
             // If we have an existing binding for this trigger, we have to
             // update the reverse mapping to remove the old action.
-            .leaf => {
+            .leaf => if (track_reverse) {
                 const t_hash = t.hash();
                 var it = self.reverse.iterator();
                 while (it.next()) |reverse_entry| it: {
@@ -1496,8 +1561,9 @@ pub const Set = struct {
             .flags = flags,
         } };
         errdefer _ = self.bindings.remove(t);
-        try self.reverse.put(alloc, action, t);
-        errdefer _ = self.reverse.remove(action);
+
+        if (track_reverse) try self.reverse.put(alloc, action, t);
+        errdefer if (track_reverse) self.reverse.remove(action);
     }
 
     /// Get a binding for a given trigger.
@@ -2340,6 +2406,39 @@ test "set: maintains reverse mapping" {
     }
 
     // removal should replace
+    s.remove(alloc, .{ .key = .{ .translated = .b } });
+    {
+        const trigger = s.getTrigger(.{ .new_window = {} }).?;
+        try testing.expect(trigger.key.translated == .a);
+    }
+}
+
+test "set: performable is not part of reverse mappings" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s: Set = .{};
+    defer s.deinit(alloc);
+
+    try s.put(alloc, .{ .key = .{ .translated = .a } }, .{ .new_window = {} });
+    {
+        const trigger = s.getTrigger(.{ .new_window = {} }).?;
+        try testing.expect(trigger.key.translated == .a);
+    }
+
+    // trigger should be non-performable
+    try s.putFlags(
+        alloc,
+        .{ .key = .{ .translated = .b } },
+        .{ .new_window = {} },
+        .{ .performable = true },
+    );
+    {
+        const trigger = s.getTrigger(.{ .new_window = {} }).?;
+        try testing.expect(trigger.key.translated == .a);
+    }
+
+    // removal of performable should do nothing
     s.remove(alloc, .{ .key = .{ .translated = .b } });
     {
         const trigger = s.getTrigger(.{ .new_window = {} }).?;

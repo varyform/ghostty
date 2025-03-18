@@ -198,6 +198,14 @@ extension Ghostty {
     /// macos-icon
     enum MacOSIcon: String {
         case official
+        case blueprint
+        case chalkboard
+        case glass
+        case holographic
+        case microchip
+        case paper
+        case retro
+        case xray
         case customStyle = "custom-style"
     }
 
@@ -239,6 +247,9 @@ extension Notification.Name {
 
     /// Close tab
     static let ghosttyCloseTab = Notification.Name("com.mitchellh.ghostty.closeTab")
+
+    /// Resize the window to a default size.
+    static let ghosttyResetWindowSize = Notification.Name("com.mitchellh.ghostty.resetWindowSize")
 }
 
 // NOTE: I am moving all of these to Notification.Name extensions over time. This

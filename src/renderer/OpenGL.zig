@@ -41,7 +41,7 @@ pub const single_threaded_draw = if (@hasDecl(apprt.Surface, "opengl_single_thre
 else
     false;
 const DrawMutex = if (single_threaded_draw) std.Thread.Mutex else void;
-const drawMutexZero = if (DrawMutex == void) void{} else .{};
+const drawMutexZero: DrawMutex = if (DrawMutex == void) void{} else .{};
 
 alloc: std.mem.Allocator,
 
@@ -706,8 +706,6 @@ pub fn updateFrame(
 
     // Update all our data as tightly as possible within the mutex.
     var critical: Critical = critical: {
-        const grid_size = self.size.grid();
-
         state.mutex.lock();
         defer state.mutex.unlock();
 
@@ -746,19 +744,6 @@ pub fn updateFrame(
             } else {
                 self.default_foreground_color = bg;
             }
-        }
-
-        // If our terminal screen size doesn't match our expected renderer
-        // size then we skip a frame. This can happen if the terminal state
-        // is resized between when the renderer mailbox is drained and when
-        // the state mutex is acquired inside this function.
-        //
-        // For some reason this doesn't seem to cause any significant issues
-        // with flickering while resizing. '\_('-')_/'
-        if (grid_size.rows != state.terminal.rows or
-            grid_size.columns != state.terminal.cols)
-        {
-            return;
         }
 
         // Get the viewport pin so that we can compare it to the current.
@@ -814,12 +799,12 @@ pub fn updateFrame(
         // the entire screen. This can be optimized in the future.
         const full_rebuild: bool = rebuild: {
             {
-                const Int = @typeInfo(terminal.Terminal.Dirty).Struct.backing_integer.?;
+                const Int = @typeInfo(terminal.Terminal.Dirty).@"struct".backing_integer.?;
                 const v: Int = @bitCast(state.terminal.flags.dirty);
                 if (v > 0) break :rebuild true;
             }
             {
-                const Int = @typeInfo(terminal.Screen.Dirty).Struct.backing_integer.?;
+                const Int = @typeInfo(terminal.Screen.Dirty).@"struct".backing_integer.?;
                 const v: Int = @bitCast(state.terminal.screen.dirty);
                 if (v > 0) break :rebuild true;
             }
@@ -1088,13 +1073,16 @@ fn prepKittyPlacement(
         break :offset_y @intCast(offset_pixels);
     } else 0;
 
+    // Get the grid size that respects aspect ratio
+    const grid_size = p.gridSize(image.*, t);
+
     // If we specify `rows` then our offset above is in viewport space
     // and not in the coordinate space of the source image. Without `rows`
     // that's one and the same.
-    const source_offset_y: u32 = if (p.rows > 0) source_offset_y: {
+    const source_offset_y: u32 = if (grid_size.rows > 0) source_offset_y: {
         // Determine the scale factor to apply for this row height.
         const image_height: f64 = @floatFromInt(image.height);
-        const viewport_height: f64 = @floatFromInt(p.rows * self.grid_metrics.cell_height);
+        const viewport_height: f64 = @floatFromInt(grid_size.rows * self.grid_metrics.cell_height);
         const scale: f64 = image_height / viewport_height;
 
         // Apply the scale to the offset
@@ -1127,11 +1115,11 @@ fn prepKittyPlacement(
         image.height -| source_y;
 
     // Calculate the width/height of our image.
-    const dest_width = if (p.columns > 0) p.columns * self.grid_metrics.cell_width else source_width;
-    const dest_height = if (p.rows > 0) rows: {
+    const dest_width = grid_size.cols * self.grid_metrics.cell_width;
+    const dest_height = if (grid_size.rows > 0) rows: {
         // Clip to the viewport to handle scrolling. offset_y is already in
         // viewport scale so we can subtract it directly.
-        break :rows (p.rows * self.grid_metrics.cell_height) - offset_y;
+        break :rows (grid_size.rows * self.grid_metrics.cell_height) - offset_y;
     } else source_height;
 
     // Accumulate the placement
@@ -1276,10 +1264,23 @@ pub fn rebuildCells(
         }
     }
 
-    // Build each cell
+    const grid_size = self.size.grid();
+
+    // We rebuild the cells row-by-row because we do font shaping by row.
     var row_it = screen.pages.rowIterator(.left_up, .{ .viewport = .{} }, null);
-    var y: terminal.size.CellCountInt = screen.pages.rows;
+    // If our cell contents buffer is shorter than the screen viewport,
+    // we render the rows that fit, starting from the bottom. If instead
+    // the viewport is shorter than the cell contents buffer, we align
+    // the top of the viewport with the top of the contents buffer.
+    var y: terminal.size.CellCountInt = @min(
+        screen.pages.rows,
+        grid_size.rows,
+    );
     while (row_it.next()) |row| {
+        // The viewport may have more rows than our cell contents,
+        // so we need to break from the loop early if we hit y = 0.
+        if (y == 0) break;
+
         y -= 1;
 
         // True if we want to do font shaping around the cursor. We want to
@@ -1356,7 +1357,11 @@ pub fn rebuildCells(
         var shaper_cells: ?[]const font.shape.Cell = null;
         var shaper_cells_i: usize = 0;
 
-        const row_cells = row.cells(.all);
+        const row_cells_all = row.cells(.all);
+
+        // If our viewport is wider than our cell contents buffer,
+        // we still only process cells up to the width of the buffer.
+        const row_cells = row_cells_all[0..@min(row_cells_all.len, grid_size.columns)];
 
         for (row_cells, 0..) |*cell, x| {
             // If this cell falls within our preedit range then we
@@ -1390,28 +1395,28 @@ pub fn rebuildCells(
                     // Try to read the cells from the shaping cache if we can.
                     self.font_shaper_cache.get(run) orelse
                     cache: {
-                    // Otherwise we have to shape them.
-                    const cells = try self.font_shaper.shape(run);
+                        // Otherwise we have to shape them.
+                        const cells = try self.font_shaper.shape(run);
 
-                    // Try to cache them. If caching fails for any reason we
-                    // continue because it is just a performance optimization,
-                    // not a correctness issue.
-                    self.font_shaper_cache.put(
-                        self.alloc,
-                        run,
-                        cells,
-                    ) catch |err| {
-                        log.warn(
-                            "error caching font shaping results err={}",
-                            .{err},
-                        );
+                        // Try to cache them. If caching fails for any reason we
+                        // continue because it is just a performance optimization,
+                        // not a correctness issue.
+                        self.font_shaper_cache.put(
+                            self.alloc,
+                            run,
+                            cells,
+                        ) catch |err| {
+                            log.warn(
+                                "error caching font shaping results err={}",
+                                .{err},
+                            );
+                        };
+
+                        // The cells we get from direct shaping are always owned
+                        // by the shaper and valid until the next shaping call so
+                        // we can safely use them.
+                        break :cache cells;
                     };
-
-                    // The cells we get from direct shaping are always owned
-                    // by the shaper and valid until the next shaping call so
-                    // we can safely use them.
-                    break :cache cells;
-                };
 
                 // Advance our index until we reach or pass
                 // our current x position in the shaper cells.
@@ -1635,28 +1640,28 @@ pub fn rebuildCells(
                     // Try to read the cells from the shaping cache if we can.
                     self.font_shaper_cache.get(run) orelse
                     cache: {
-                    // Otherwise we have to shape them.
-                    const cells = try self.font_shaper.shape(run);
+                        // Otherwise we have to shape them.
+                        const cells = try self.font_shaper.shape(run);
 
-                    // Try to cache them. If caching fails for any reason we
-                    // continue because it is just a performance optimization,
-                    // not a correctness issue.
-                    self.font_shaper_cache.put(
-                        self.alloc,
-                        run,
-                        cells,
-                    ) catch |err| {
-                        log.warn(
-                            "error caching font shaping results err={}",
-                            .{err},
-                        );
+                        // Try to cache them. If caching fails for any reason we
+                        // continue because it is just a performance optimization,
+                        // not a correctness issue.
+                        self.font_shaper_cache.put(
+                            self.alloc,
+                            run,
+                            cells,
+                        ) catch |err| {
+                            log.warn(
+                                "error caching font shaping results err={}",
+                                .{err},
+                            );
+                        };
+
+                        // The cells we get from direct shaping are always owned
+                        // by the shaper and valid until the next shaping call so
+                        // we can safely use them.
+                        break :cache cells;
                     };
-
-                    // The cells we get from direct shaping are always owned
-                    // by the shaper and valid until the next shaping call so
-                    // we can safely use them.
-                    break :cache cells;
-                };
 
                 const cells = shaper_cells orelse break :glyphs;
 
@@ -2103,6 +2108,7 @@ fn addGlyph(
         shaper_run.font_index,
         shaper_cell.glyph_index,
         .{
+            .cell_width = if (cell.wide == .wide) 2 else 1,
             .grid_metrics = self.grid_metrics,
             .thicken = self.config.font_thicken,
             .thicken_strength = self.config.font_thicken_strength,
@@ -2324,7 +2330,7 @@ pub fn drawFrame(self: *OpenGL, surface: *apprt.Surface) !void {
     // This locks the context and avoids crashes that can happen due to
     // races with the underlying Metal layer that Apple is using to
     // implement OpenGL.
-    const is_darwin = builtin.target.isDarwin();
+    const is_darwin = builtin.target.os.tag.isDarwin();
     const ogl = if (comptime is_darwin) @cImport({
         @cInclude("OpenGL/OpenGL.h");
     }) else {};
@@ -2350,11 +2356,9 @@ pub fn drawFrame(self: *OpenGL, surface: *apprt.Surface) !void {
 }
 
 /// Draw the custom shaders.
-fn drawCustomPrograms(
-    self: *OpenGL,
-    custom_state: *custom.State,
-) !void {
+fn drawCustomPrograms(self: *OpenGL, custom_state: *custom.State) !void {
     _ = self;
+    assert(custom_state.programs.len > 0);
 
     // Bind our state that is global to all custom shaders
     const custom_bind = try custom_state.bind();
@@ -2365,10 +2369,10 @@ fn drawCustomPrograms(
 
     // Go through each custom shader and draw it.
     for (custom_state.programs) |program| {
-        // Bind our cell program state, buffers
         const bind = try program.bind();
         defer bind.unbind();
         try bind.draw();
+        try custom_state.copyFramebuffer();
     }
 }
 

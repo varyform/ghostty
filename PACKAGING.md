@@ -23,13 +23,6 @@ https://release.files.ghostty.org/VERSION/ghostty-VERSION.tar.gz
 https://release.files.ghostty.org/VERSION/ghostty-VERSION.tar.gz.minisig
 ```
 
-> [!NOTE]
->
-> **Version 1.0.0 the filename is `ghostty-source.tar.gz`.** Future
-> versions will use the `ghostty-VERSION.tar.gz` format since it is more
-> typical for source tarballs. But for version 1.0.0, the filename is
-> `ghostty-source.tar.gz`.
-
 Signature files are signed with
 [minisign](https://jedisct1.github.io/minisign/)
 using the following public key:
@@ -55,7 +48,7 @@ To find the version of Zig required to build Ghostty, check the `required_zig`
 constant in `build.zig`. You don't need to know Zig to extract this information.
 This version will always be an official released version of Zig.
 
-For example, at the time of writing this document, Ghostty requires Zig 0.13.0.
+For example, at the time of writing this document, Ghostty requires Zig 0.14.0.
 
 ## Building Ghostty
 
@@ -87,6 +80,13 @@ binary will be at `/tmp/ghostty/usr/bin/ghostty`). This style is common
 for system packages which separate a build and install step, since the
 install step can then be done with a `mv` or `cp` command (from `/tmp/ghostty`
 to wherever the package manager expects it).
+
+> [!NOTE]
+>
+> **Version 1.1.1 and 1.1.2 are missing `fetch-zig-cache.sh`.** This was
+> an oversight on the release process. You can use the script from version
+> 1.1.0 to fetch the Zig cache for these versions. Future versions will
+> restore the script.
 
 ### Build Options
 

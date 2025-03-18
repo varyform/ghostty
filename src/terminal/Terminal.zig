@@ -11,7 +11,7 @@ const Allocator = std.mem.Allocator;
 const unicode = @import("../unicode/main.zig");
 
 const ansi = @import("ansi.zig");
-const modes = @import("modes.zig");
+const modespkg = @import("modes.zig");
 const charsets = @import("charsets.zig");
 const csi = @import("csi.zig");
 const hyperlink = @import("hyperlink.zig");
@@ -20,7 +20,7 @@ const point = @import("point.zig");
 const sgr = @import("sgr.zig");
 const Tabstops = @import("Tabstops.zig");
 const color = @import("color.zig");
-const mouse_shape = @import("mouse_shape.zig");
+const mouse_shape_pkg = @import("mouse_shape.zig");
 
 const size = @import("size.zig");
 const pagepkg = @import("page.zig");
@@ -77,7 +77,7 @@ default_palette: color.Palette = color.default,
 /// The color palette to use. The mask indicates which palette indices have been
 /// modified with OSC 4
 color_palette: struct {
-    const Mask = std.StaticBitSet(@typeInfo(color.Palette).Array.len);
+    const Mask = std.StaticBitSet(@typeInfo(color.Palette).array.len);
     colors: color.Palette = color.default,
     mask: Mask = Mask.initEmpty(),
 } = .{},
@@ -87,10 +87,10 @@ color_palette: struct {
 previous_char: ?u21 = null,
 
 /// The modes that this terminal currently has active.
-modes: modes.ModeState = .{},
+modes: modespkg.ModeState = .{},
 
 /// The most recently set mouse shape for the terminal.
-mouse_shape: mouse_shape.MouseShape = .text,
+mouse_shape: mouse_shape_pkg.MouseShape = .text,
 
 /// These are just a packed set of flags we may set on the terminal.
 flags: packed struct {
@@ -196,7 +196,7 @@ pub const Options = struct {
 
     /// The default mode state. When the terminal gets a reset, it
     /// will revert back to this state.
-    default_modes: modes.ModePacked = .{},
+    default_modes: modespkg.ModePacked = .{},
 };
 
 /// Initialize a new terminal.
@@ -10706,6 +10706,87 @@ test "Terminal: resize with high unique style per cell with wrapping" {
     }
 
     try t.resize(alloc, 60, 30);
+}
+
+test "Terminal: resize with reflow and saved cursor" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 2, .rows = 3 });
+    defer t.deinit(alloc);
+    try t.printString("1A2B");
+    t.setCursorPos(2, 2);
+    {
+        const list_cell = t.screen.pages.getCell(.{ .active = .{
+            .x = t.screen.cursor.x,
+            .y = t.screen.cursor.y,
+        } }).?;
+        const cell = list_cell.cell;
+        try testing.expectEqual(@as(u32, 'B'), cell.content.codepoint);
+    }
+
+    {
+        const str = try t.plainString(testing.allocator);
+        defer testing.allocator.free(str);
+        try testing.expectEqualStrings("1A\n2B", str);
+    }
+
+    t.saveCursor();
+    try t.resize(alloc, 5, 3);
+    try t.restoreCursor();
+
+    {
+        const str = try t.plainString(testing.allocator);
+        defer testing.allocator.free(str);
+        try testing.expectEqualStrings("1A2B", str);
+    }
+
+    // Verify our cursor is still in the same place
+    {
+        const list_cell = t.screen.pages.getCell(.{ .active = .{
+            .x = t.screen.cursor.x,
+            .y = t.screen.cursor.y,
+        } }).?;
+        const cell = list_cell.cell;
+        try testing.expectEqual(@as(u32, 'B'), cell.content.codepoint);
+    }
+}
+
+test "Terminal: resize with reflow and saved cursor pending wrap" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 2, .rows = 3 });
+    defer t.deinit(alloc);
+    try t.printString("1A2B");
+    {
+        const list_cell = t.screen.pages.getCell(.{ .active = .{
+            .x = t.screen.cursor.x,
+            .y = t.screen.cursor.y,
+        } }).?;
+        const cell = list_cell.cell;
+        try testing.expectEqual(@as(u32, 'B'), cell.content.codepoint);
+    }
+
+    {
+        const str = try t.plainString(testing.allocator);
+        defer testing.allocator.free(str);
+        try testing.expectEqualStrings("1A\n2B", str);
+    }
+
+    t.saveCursor();
+    try t.resize(alloc, 5, 3);
+    try t.restoreCursor();
+
+    {
+        const str = try t.plainString(testing.allocator);
+        defer testing.allocator.free(str);
+        try testing.expectEqualStrings("1A2B", str);
+    }
+
+    // Pending wrap should be reset
+    try t.print('X');
+    {
+        const str = try t.plainString(testing.allocator);
+        defer testing.allocator.free(str);
+        try testing.expectEqualStrings("1A2BX", str);
+    }
 }
 
 test "Terminal: DECCOLM without DEC mode 40" {

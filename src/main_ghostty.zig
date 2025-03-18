@@ -13,7 +13,6 @@ const macos = @import("macos");
 const oni = @import("oniguruma");
 const cli = @import("cli.zig");
 const internal_os = @import("os/main.zig");
-const xev = @import("xev");
 const fontconfig = @import("fontconfig");
 const harfbuzz = @import("harfbuzz");
 const renderer = @import("renderer.zig");
@@ -131,7 +130,7 @@ fn logFn(
     //
     //   sudo log stream --level debug --predicate 'subsystem=="com.mitchellh.ghostty"'
     //
-    if (builtin.target.isDarwin()) {
+    if (builtin.target.os.tag.isDarwin()) {
         // Convert our levels to Mac levels
         const mac_level: macos.os.LogType = switch (level) {
             .debug => .debug,

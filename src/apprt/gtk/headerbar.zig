@@ -1,96 +1,54 @@
+const HeaderBar = @This();
+
 const std = @import("std");
-const c = @import("c.zig").c;
+
+const adw = @import("adw");
+const gtk = @import("gtk");
 
 const Window = @import("Window.zig");
-const adwaita = @import("adwaita.zig");
 
-const AdwHeaderBar = if (adwaita.versionAtLeast(0, 0, 0)) c.AdwHeaderBar else void;
+/// the Adwaita headerbar widget
+headerbar: *adw.HeaderBar,
 
-pub const HeaderBar = union(enum) {
-    adw: *AdwHeaderBar,
-    gtk: *c.GtkHeaderBar,
+/// the Window that we belong to
+window: *Window,
 
-    pub fn init(window: *Window) HeaderBar {
-        if ((comptime adwaita.versionAtLeast(1, 4, 0)) and
-            adwaita.enabled(&window.app.config))
-        {
-            return initAdw(window);
-        }
+/// the Adwaita window title widget
+title: *adw.WindowTitle,
 
-        return initGtk();
-    }
+pub fn init(self: *HeaderBar, window: *Window) void {
+    self.* = .{
+        .headerbar = adw.HeaderBar.new(),
+        .window = window,
+        .title = adw.WindowTitle.new(
+            window.window.as(gtk.Window).getTitle() orelse "Ghostty",
+            "",
+        ),
+    };
+    self.headerbar.setTitleWidget(self.title.as(gtk.Widget));
+}
 
-    fn initAdw(window: *Window) HeaderBar {
-        const headerbar = c.adw_header_bar_new();
-        c.adw_header_bar_set_title_widget(@ptrCast(headerbar), @ptrCast(c.adw_window_title_new(c.gtk_window_get_title(window.window) orelse "Ghostty", null)));
-        return .{ .adw = @ptrCast(headerbar) };
-    }
+pub fn setVisible(self: *const HeaderBar, visible: bool) void {
+    self.headerbar.as(gtk.Widget).setVisible(@intFromBool(visible));
+}
 
-    fn initGtk() HeaderBar {
-        const headerbar = c.gtk_header_bar_new();
-        return .{ .gtk = @ptrCast(headerbar) };
-    }
+pub fn asWidget(self: *const HeaderBar) *gtk.Widget {
+    return self.headerbar.as(gtk.Widget);
+}
 
-    pub fn setVisible(self: HeaderBar, visible: bool) void {
-        c.gtk_widget_set_visible(self.asWidget(), @intFromBool(visible));
-    }
+pub fn packEnd(self: *const HeaderBar, widget: *gtk.Widget) void {
+    self.headerbar.packEnd(widget);
+}
 
-    pub fn asWidget(self: HeaderBar) *c.GtkWidget {
-        return switch (self) {
-            .adw => |headerbar| @ptrCast(@alignCast(headerbar)),
-            .gtk => |headerbar| @ptrCast(@alignCast(headerbar)),
-        };
-    }
+pub fn packStart(self: *const HeaderBar, widget: *gtk.Widget) void {
+    self.headerbar.packStart(widget);
+}
 
-    pub fn packEnd(self: HeaderBar, widget: *c.GtkWidget) void {
-        switch (self) {
-            .adw => |headerbar| if (comptime adwaita.versionAtLeast(0, 0, 0)) {
-                c.adw_header_bar_pack_end(
-                    @ptrCast(@alignCast(headerbar)),
-                    widget,
-                );
-            },
-            .gtk => |headerbar| c.gtk_header_bar_pack_end(
-                @ptrCast(@alignCast(headerbar)),
-                widget,
-            ),
-        }
-    }
+pub fn setTitle(self: *const HeaderBar, title: [:0]const u8) void {
+    self.window.window.as(gtk.Window).setTitle(title);
+    self.title.setTitle(title);
+}
 
-    pub fn packStart(self: HeaderBar, widget: *c.GtkWidget) void {
-        switch (self) {
-            .adw => |headerbar| if (comptime adwaita.versionAtLeast(0, 0, 0)) {
-                c.adw_header_bar_pack_start(
-                    @ptrCast(@alignCast(headerbar)),
-                    widget,
-                );
-            },
-            .gtk => |headerbar| c.gtk_header_bar_pack_start(
-                @ptrCast(@alignCast(headerbar)),
-                widget,
-            ),
-        }
-    }
-
-    pub fn setTitle(self: HeaderBar, title: [:0]const u8) void {
-        switch (self) {
-            .adw => |headerbar| if (comptime adwaita.versionAtLeast(0, 0, 0)) {
-                const window_title: *c.AdwWindowTitle = @ptrCast(c.adw_header_bar_get_title_widget(@ptrCast(headerbar)));
-                c.adw_window_title_set_title(window_title, title);
-            },
-            // The title is owned by the window when not using Adwaita
-            .gtk => unreachable,
-        }
-    }
-
-    pub fn setSubtitle(self: HeaderBar, subtitle: [:0]const u8) void {
-        switch (self) {
-            .adw => |headerbar| if (comptime adwaita.versionAtLeast(0, 0, 0)) {
-                const window_title: *c.AdwWindowTitle = @ptrCast(c.adw_header_bar_get_title_widget(@ptrCast(headerbar)));
-                c.adw_window_title_set_subtitle(window_title, subtitle);
-            },
-            // There is no subtitle unless Adwaita is used
-            .gtk => unreachable,
-        }
-    }
-};
+pub fn setSubtitle(self: *const HeaderBar, subtitle: [:0]const u8) void {
+    self.title.setSubtitle(subtitle);
+}

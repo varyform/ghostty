@@ -56,7 +56,7 @@ const std_size = Page.layout(std_capacity).total_size;
 /// allocator because we need memory that is zero-initialized and page-aligned.
 const PagePool = std.heap.MemoryPoolAligned(
     [std_size]u8,
-    std.mem.page_size,
+    std.heap.page_size_min,
 );
 
 /// List of pins, known as "tracked" pins. These are pins that are kept
@@ -520,6 +520,7 @@ pub fn clone(
         assert(node.data.capacity.rows >= chunk.end - chunk.start);
         defer node.data.assertIntegrity();
         node.data.size.rows = chunk.end - chunk.start;
+        node.data.size.cols = chunk.node.data.size.cols;
         try node.data.cloneFrom(
             &chunk.node.data,
             chunk.start,
@@ -1976,7 +1977,7 @@ fn createPageExt(
     else
         try page_alloc.alignedAlloc(
             u8,
-            std.mem.page_size,
+            std.heap.page_size_min,
             layout.total_size,
         );
     errdefer if (pooled)

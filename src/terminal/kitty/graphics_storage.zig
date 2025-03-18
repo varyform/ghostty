@@ -397,6 +397,30 @@ pub const ImageStorage = struct {
                 self.dirty = true;
             },
 
+            .range => |v| range: {
+                if (v.first <= 0 or v.last <= 0) {
+                    log.warn("delete range values must be greater than zero", .{});
+                    break :range;
+                }
+                if (v.first > v.last) {
+                    log.warn("delete range 'x' ({}) must be less than or equal to 'y' ({})", .{ v.first, v.last });
+                    break :range;
+                }
+
+                var it = self.placements.iterator();
+                while (it.next()) |entry| {
+                    if (entry.key_ptr.image_id >= v.first or entry.key_ptr.image_id <= v.last) {
+                        const image_id = entry.key_ptr.image_id;
+                        entry.value_ptr.deinit(&t.screen);
+                        self.placements.removeByPtr(entry.key_ptr);
+                        if (v.delete) self.deleteIfUnused(alloc, image_id);
+                    }
+                }
+
+                // Mark dirty to force redraw
+                self.dirty = true;
+            },
+
             // We don't support animation frames yet so they are successfully
             // deleted!
             .animation_frames => {},
@@ -663,6 +687,33 @@ pub const ImageStorage = struct {
             // Calculate our image size in grid cells
             const width_f64: f64 = @floatFromInt(width_px);
             const height_f64: f64 = @floatFromInt(height_px);
+
+            // If only columns is specified, calculate rows based on aspect ratio
+            if (self.columns > 0 and self.rows == 0) {
+                const cols_f64: f64 = @floatFromInt(self.columns);
+                const cols_px = cols_f64 * cell_width_f64;
+                const aspect_ratio = height_f64 / width_f64;
+                const rows_px = cols_px * aspect_ratio;
+                const rows_cells = rows_px / cell_height_f64;
+                return .{
+                    .cols = self.columns,
+                    .rows = @intFromFloat(@ceil(rows_cells)),
+                };
+            }
+
+            // If only rows is specified, calculate columns based on aspect ratio
+            if (self.rows > 0 and self.columns == 0) {
+                const rows_f64: f64 = @floatFromInt(self.rows);
+                const rows_px = rows_f64 * cell_height_f64;
+                const aspect_ratio = width_f64 / height_f64;
+                const cols_px = rows_px * aspect_ratio;
+                const cols_cells = cols_px / cell_width_f64;
+                return .{
+                    .cols = @intFromFloat(@ceil(cols_cells)),
+                    .rows = self.rows,
+                };
+            }
+
             const width_cells: u32 = @intFromFloat(@ceil(width_f64 / cell_width_f64));
             const height_cells: u32 = @intFromFloat(@ceil(height_f64 / cell_height_f64));
 
@@ -1110,4 +1161,144 @@ test "storage: delete by row 1x1" {
         .image_id = 1,
         .placement_id = .{ .tag = .external, .id = 3 },
     }) != null);
+}
+
+test "storage: delete images by range 1" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var t = try terminal.Terminal.init(alloc, .{ .rows = 3, .cols = 3 });
+    defer t.deinit(alloc);
+    const tracked = t.screen.pages.countTrackedPins();
+
+    var s: ImageStorage = .{};
+    defer s.deinit(alloc, &t.screen);
+    try s.addImage(alloc, .{ .id = 1 });
+    try s.addImage(alloc, .{ .id = 2 });
+    try s.addImage(alloc, .{ .id = 3 });
+    try s.addPlacement(alloc, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
+    try s.addPlacement(alloc, 2, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
+    try testing.expectEqual(@as(usize, 3), s.images.count());
+    try testing.expectEqual(@as(usize, 2), s.placements.count());
+
+    s.dirty = false;
+    s.delete(alloc, &t, .{ .range = .{ .delete = false, .first = 1, .last = 2 } });
+    try testing.expect(s.dirty);
+    try testing.expectEqual(@as(usize, 3), s.images.count());
+    try testing.expectEqual(@as(usize, 0), s.placements.count());
+    try testing.expectEqual(tracked, t.screen.pages.countTrackedPins());
+}
+
+test "storage: delete images by range 2" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var t = try terminal.Terminal.init(alloc, .{ .rows = 3, .cols = 3 });
+    defer t.deinit(alloc);
+    const tracked = t.screen.pages.countTrackedPins();
+
+    var s: ImageStorage = .{};
+    defer s.deinit(alloc, &t.screen);
+    try s.addImage(alloc, .{ .id = 1 });
+    try s.addImage(alloc, .{ .id = 2 });
+    try s.addImage(alloc, .{ .id = 3 });
+    try s.addPlacement(alloc, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
+    try s.addPlacement(alloc, 2, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
+    try testing.expectEqual(@as(usize, 3), s.images.count());
+    try testing.expectEqual(@as(usize, 2), s.placements.count());
+
+    s.dirty = false;
+    s.delete(alloc, &t, .{ .range = .{ .delete = true, .first = 1, .last = 2 } });
+    try testing.expect(s.dirty);
+    try testing.expectEqual(@as(usize, 1), s.images.count());
+    try testing.expectEqual(@as(usize, 0), s.placements.count());
+    try testing.expectEqual(tracked, t.screen.pages.countTrackedPins());
+}
+
+test "storage: delete images by range 3" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var t = try terminal.Terminal.init(alloc, .{ .rows = 3, .cols = 3 });
+    defer t.deinit(alloc);
+    const tracked = t.screen.pages.countTrackedPins();
+
+    var s: ImageStorage = .{};
+    defer s.deinit(alloc, &t.screen);
+    try s.addImage(alloc, .{ .id = 1 });
+    try s.addImage(alloc, .{ .id = 2 });
+    try s.addImage(alloc, .{ .id = 3 });
+    try s.addPlacement(alloc, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
+    try s.addPlacement(alloc, 2, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
+    try testing.expectEqual(@as(usize, 3), s.images.count());
+    try testing.expectEqual(@as(usize, 2), s.placements.count());
+
+    s.dirty = false;
+    s.delete(alloc, &t, .{ .range = .{ .delete = false, .first = 1, .last = 1 } });
+    try testing.expect(s.dirty);
+    try testing.expectEqual(@as(usize, 3), s.images.count());
+    try testing.expectEqual(@as(usize, 0), s.placements.count());
+    try testing.expectEqual(tracked, t.screen.pages.countTrackedPins());
+}
+
+test "storage: delete images by range 4" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var t = try terminal.Terminal.init(alloc, .{ .rows = 3, .cols = 3 });
+    defer t.deinit(alloc);
+    const tracked = t.screen.pages.countTrackedPins();
+
+    var s: ImageStorage = .{};
+    defer s.deinit(alloc, &t.screen);
+    try s.addImage(alloc, .{ .id = 1 });
+    try s.addImage(alloc, .{ .id = 2 });
+    try s.addImage(alloc, .{ .id = 3 });
+    try s.addPlacement(alloc, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
+    try s.addPlacement(alloc, 2, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
+    try testing.expectEqual(@as(usize, 3), s.images.count());
+    try testing.expectEqual(@as(usize, 2), s.placements.count());
+
+    s.dirty = false;
+    s.delete(alloc, &t, .{ .range = .{ .delete = true, .first = 1, .last = 1 } });
+    try testing.expect(s.dirty);
+    try testing.expectEqual(@as(usize, 1), s.images.count());
+    try testing.expectEqual(@as(usize, 0), s.placements.count());
+    try testing.expectEqual(tracked, t.screen.pages.countTrackedPins());
+}
+
+test "storage: aspect ratio calculation when only columns or rows specified" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try terminal.Terminal.init(alloc, .{ .cols = 100, .rows = 100 });
+    defer t.deinit(alloc);
+    t.width_px = 100;
+    t.height_px = 100;
+
+    // Case 1: Only columns specified
+    {
+        const image = Image{ .id = 1, .width = 4, .height = 2 };
+        var placement = ImageStorage.Placement{
+            .location = .{ .virtual = {} },
+            .columns = 6,
+            .rows = 0,
+        };
+
+        const grid_size = placement.gridSize(image, &t);
+        // 6 columns * (2/4) = 3 rows
+        try testing.expectEqual(@as(u32, 6), grid_size.cols);
+        try testing.expectEqual(@as(u32, 3), grid_size.rows);
+    }
+
+    // Case 2: Only rows specified
+    {
+        const image = Image{ .id = 2, .width = 2, .height = 4 };
+        var placement = ImageStorage.Placement{
+            .location = .{ .virtual = {} },
+            .columns = 0,
+            .rows = 6,
+        };
+
+        const grid_size = placement.gridSize(image, &t);
+        // 6 rows * (2/4) = 3 columns
+        try testing.expectEqual(@as(u32, 3), grid_size.cols);
+        try testing.expectEqual(@as(u32, 6), grid_size.rows);
+    }
 }

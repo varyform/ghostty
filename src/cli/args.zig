@@ -8,6 +8,8 @@ const internal_os = @import("../os/main.zig");
 const Diagnostic = diags.Diagnostic;
 const DiagnosticList = diags.DiagnosticList;
 
+const log = std.log.scoped(.cli);
+
 // TODO:
 //   - Only `--long=value` format is accepted. Do we want to allow
 //     `--long value`? Not currently allowed.
@@ -38,6 +40,12 @@ pub const Error = error{
 /// "DiagnosticList" and any diagnostic messages will be added to that list.
 /// When diagnostics are present, only allocation errors will be returned.
 ///
+/// If the destination type has a decl "renamed", it must be of type
+/// std.StaticStringMap([]const u8) and contains a mapping from the old
+/// field name to the new field name. This is used to allow renaming fields
+/// while still supporting the old name. If a renamed field is set, parsing
+/// will automatically set the new field name.
+///
 /// Note: If the arena is already non-null, then it will be used. In this
 /// case, in the case of an error some memory might be leaked into the arena.
 pub fn parse(
@@ -47,7 +55,25 @@ pub fn parse(
     iter: anytype,
 ) !void {
     const info = @typeInfo(T);
-    assert(info == .Struct);
+    assert(info == .@"struct");
+
+    comptime {
+        // Verify all renamed fields are valid (source does not exist,
+        // destination does exist).
+        if (@hasDecl(T, "renamed")) {
+            for (T.renamed.keys(), T.renamed.values()) |key, value| {
+                if (@hasField(T, key)) {
+                    @compileLog(key);
+                    @compileError("renamed field source exists");
+                }
+
+                if (!@hasField(T, value)) {
+                    @compileLog(value);
+                    @compileError("renamed field destination does not exist");
+                }
+            }
+        }
+    }
 
     // Make an arena for all our allocations if we support it. Otherwise,
     // use an allocator that always fails. If the arena is already set on
@@ -182,10 +208,10 @@ fn formatInvalidValue(
 
 fn formatValues(comptime T: type, key: []const u8, writer: anytype) std.mem.Allocator.Error!void {
     const typeinfo = @typeInfo(T);
-    inline for (typeinfo.Struct.fields) |f| {
+    inline for (typeinfo.@"struct".fields) |f| {
         if (std.mem.eql(u8, key, f.name)) {
             switch (@typeInfo(f.type)) {
-                .Enum => |e| {
+                .@"enum" => |e| {
                     try writer.print(", valid values are: ", .{});
                     inline for (e.fields, 0..) |field, i| {
                         if (i != 0) try writer.print(", ", .{});
@@ -217,49 +243,57 @@ pub fn parseIntoField(
     value: ?[]const u8,
 ) !void {
     const info = @typeInfo(T);
-    assert(info == .Struct);
+    assert(info == .@"struct");
 
-    inline for (info.Struct.fields) |field| {
+    inline for (info.@"struct".fields) |field| {
         if (field.name[0] != '_' and mem.eql(u8, field.name, key)) {
+            // For optional fields, we just treat it as the child type.
+            // This lets optional fields default to null but get set by
+            // the CLI.
+            const Field = switch (@typeInfo(field.type)) {
+                .optional => |opt| opt.child,
+                else => field.type,
+            };
+            const fieldInfo = @typeInfo(Field);
+            const canHaveDecls = fieldInfo == .@"struct" or
+                fieldInfo == .@"union" or
+                fieldInfo == .@"enum";
+
             // If the value is empty string (set but empty string),
             // then we reset the value to the default.
             if (value) |v| default: {
                 if (v.len != 0) break :default;
-                const raw = field.default_value orelse break :default;
+                // Set default value if possible.
+                if (canHaveDecls and @hasDecl(Field, "init")) {
+                    try @field(dst, field.name).init(alloc);
+                    return;
+                }
+                const raw = field.default_value_ptr orelse break :default;
                 const ptr: *const field.type = @alignCast(@ptrCast(raw));
                 @field(dst, field.name) = ptr.*;
                 return;
             }
 
-            // For optional fields, we just treat it as the child type.
-            // This lets optional fields default to null but get set by
-            // the CLI.
-            const Field = switch (@typeInfo(field.type)) {
-                .Optional => |opt| opt.child,
-                else => field.type,
-            };
-
             // If we are a type that can have decls and have a parseCLI decl,
             // we call that and use that to set the value.
-            const fieldInfo = @typeInfo(Field);
-            if (fieldInfo == .Struct or fieldInfo == .Union or fieldInfo == .Enum) {
+            if (canHaveDecls) {
                 if (@hasDecl(Field, "parseCLI")) {
-                    const fnInfo = @typeInfo(@TypeOf(Field.parseCLI)).Fn;
+                    const fnInfo = @typeInfo(@TypeOf(Field.parseCLI)).@"fn";
                     switch (fnInfo.params.len) {
                         // 1 arg = (input) => output
                         1 => @field(dst, field.name) = try Field.parseCLI(value),
 
                         // 2 arg = (self, input) => void
                         2 => switch (@typeInfo(field.type)) {
-                            .Struct,
-                            .Union,
-                            .Enum,
+                            .@"struct",
+                            .@"union",
+                            .@"enum",
                             => try @field(dst, field.name).parseCLI(value),
 
                             // If the field is optional and set, then we use
                             // the pointer value directly into it. If its not
                             // set we need to create a new instance.
-                            .Optional => if (@field(dst, field.name)) |*v| {
+                            .optional => if (@field(dst, field.name)) |*v| {
                                 try v.parseCLI(value);
                             } else {
                                 // Note: you cannot do @field(dst, name) = undefined
@@ -275,12 +309,12 @@ pub fn parseIntoField(
 
                         // 3 arg = (self, alloc, input) => void
                         3 => switch (@typeInfo(field.type)) {
-                            .Struct,
-                            .Union,
-                            .Enum,
+                            .@"struct",
+                            .@"union",
+                            .@"enum",
                             => try @field(dst, field.name).parseCLI(alloc, value),
 
-                            .Optional => if (@field(dst, field.name)) |*v| {
+                            .optional => if (@field(dst, field.name)) |*v| {
                                 try v.parseCLI(alloc, value);
                             } else {
                                 var tmp: Field = undefined;
@@ -342,18 +376,18 @@ pub fn parseIntoField(
                 ) catch return error.InvalidValue,
 
                 else => switch (fieldInfo) {
-                    .Enum => std.meta.stringToEnum(
+                    .@"enum" => std.meta.stringToEnum(
                         Field,
                         value orelse return error.ValueRequired,
                     ) orelse return error.InvalidValue,
 
-                    .Struct => try parseStruct(
+                    .@"struct" => try parseStruct(
                         Field,
                         alloc,
                         value orelse return error.ValueRequired,
                     ),
 
-                    .Union => try parseTaggedUnion(
+                    .@"union" => try parseTaggedUnion(
                         Field,
                         alloc,
                         value orelse return error.ValueRequired,
@@ -367,12 +401,22 @@ pub fn parseIntoField(
         }
     }
 
+    // Unknown field, is the field renamed?
+    if (@hasDecl(T, "renamed")) {
+        for (T.renamed.keys(), T.renamed.values()) |old, new| {
+            if (mem.eql(u8, old, key)) {
+                try parseIntoField(T, alloc, dst, new, value);
+                return;
+            }
+        }
+    }
+
     return error.InvalidField;
 }
 
 fn parseTaggedUnion(comptime T: type, alloc: Allocator, v: []const u8) !T {
-    const info = @typeInfo(T).Union;
-    assert(@typeInfo(info.tag_type.?) == .Enum);
+    const info = @typeInfo(T).@"union";
+    assert(@typeInfo(info.tag_type.?) == .@"enum");
 
     // Get the union tag that is being set. We support values with no colon
     // if the value is void so its not an error to have no colon.
@@ -391,12 +435,12 @@ fn parseTaggedUnion(comptime T: type, alloc: Allocator, v: []const u8) !T {
 
             // We need to create a struct that looks like this union field.
             // This lets us use parseIntoField as if its a dedicated struct.
-            const Target = @Type(.{ .Struct = .{
+            const Target = @Type(.{ .@"struct" = .{
                 .layout = .auto,
                 .fields = &.{.{
                     .name = field.name,
                     .type = field.type,
-                    .default_value = null,
+                    .default_value_ptr = null,
                     .is_comptime = false,
                     .alignment = @alignOf(field.type),
                 }},
@@ -417,7 +461,7 @@ fn parseTaggedUnion(comptime T: type, alloc: Allocator, v: []const u8) !T {
 }
 
 fn parseStruct(comptime T: type, alloc: Allocator, v: []const u8) !T {
-    return switch (@typeInfo(T).Struct.layout) {
+    return switch (@typeInfo(T).@"struct".layout) {
         .auto => parseAutoStruct(T, alloc, v),
         .@"packed" => parsePackedStruct(T, v),
         else => @compileError("unsupported struct layout"),
@@ -425,7 +469,7 @@ fn parseStruct(comptime T: type, alloc: Allocator, v: []const u8) !T {
 }
 
 pub fn parseAutoStruct(comptime T: type, alloc: Allocator, v: []const u8) !T {
-    const info = @typeInfo(T).Struct;
+    const info = @typeInfo(T).@"struct";
     comptime assert(info.layout == .auto);
 
     // We start our result as undefined so we don't get an error for required
@@ -477,7 +521,7 @@ pub fn parseAutoStruct(comptime T: type, alloc: Allocator, v: []const u8) !T {
     // Ensure all required fields are set
     inline for (info.fields, 0..) |field, i| {
         if (!fields_set.isSet(i)) {
-            const default_ptr = field.default_value orelse return error.InvalidValue;
+            const default_ptr = field.default_value_ptr orelse return error.InvalidValue;
             const typed_ptr: *const field.type = @alignCast(@ptrCast(default_ptr));
             @field(result, field.name) = typed_ptr.*;
         }
@@ -487,7 +531,7 @@ pub fn parseAutoStruct(comptime T: type, alloc: Allocator, v: []const u8) !T {
 }
 
 fn parsePackedStruct(comptime T: type, v: []const u8) !T {
-    const info = @typeInfo(T).Struct;
+    const info = @typeInfo(T).@"struct";
     comptime assert(info.layout == .@"packed");
 
     var result: T = .{};
@@ -723,6 +767,29 @@ test "parseIntoField: ignore underscore-prefixed fields" {
         parseIntoField(@TypeOf(data), alloc, &data, "_a", "42"),
     );
     try testing.expectEqualStrings("12", data._a);
+}
+
+test "parseIntoField: struct with init func" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var data: struct {
+        a: struct {
+            const Self = @This();
+
+            v: []const u8,
+
+            pub fn init(self: *Self, _alloc: Allocator) !void {
+                _ = _alloc;
+                self.* = .{ .v = "HELLO!" };
+            }
+        },
+    } = undefined;
+
+    try parseIntoField(@TypeOf(data), alloc, &data, "a", "");
+    try testing.expectEqual(@as([]const u8, "HELLO!"), data.a.v);
 }
 
 test "parseIntoField: string" {
@@ -1104,6 +1171,24 @@ test "parseIntoField: tagged union missing tag" {
     );
 }
 
+test "parseIntoField: renamed field" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var data: struct {
+        a: []const u8,
+
+        const renamed = std.StaticStringMap([]const u8).initComptime(&.{
+            .{ "old", "a" },
+        });
+    } = undefined;
+
+    try parseIntoField(@TypeOf(data), alloc, &data, "old", "42");
+    try testing.expectEqualStrings("42", data.a);
+}
+
 /// An iterator that considers its location to be CLI args. It
 /// iterates through an underlying iterator and increments a counter
 /// to track the current CLI arg index.
@@ -1206,9 +1291,11 @@ pub fn LineIterator(comptime ReaderType: type) type {
             const buf = buf: {
                 while (true) {
                     // Read the full line
-                    var entry = self.r.readUntilDelimiterOrEof(self.entry[2..], '\n') catch {
-                        // TODO: handle errors
-                        unreachable;
+                    var entry = self.r.readUntilDelimiterOrEof(self.entry[2..], '\n') catch |err| switch (err) {
+                        inline else => |e| {
+                            log.warn("cannot read from \"{s}\": {}", .{ self.filepath, e });
+                            return null;
+                        },
                     } orelse return null;
 
                     // Increment our line counter

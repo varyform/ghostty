@@ -92,6 +92,9 @@ pub const Action = union(Key) {
     /// Close all open windows.
     close_all_windows,
 
+    /// Toggle maximized window state.
+    toggle_maximize,
+
     /// Toggle fullscreen mode.
     toggle_fullscreen: Fullscreen,
 
@@ -137,9 +140,20 @@ pub const Action = union(Key) {
     /// Sets a size limit (in pixels) for the target terminal.
     size_limit: SizeLimit,
 
-    /// Specifies the initial size of the target terminal. This will be
-    /// sent only during the initialization of a surface. If it is received
-    /// after the surface is initialized it should be ignored.
+    /// Resets the window size to the default size. See the
+    /// `reset_window_size` keybinding for more information.
+    reset_window_size,
+
+    /// Specifies the initial size of the target terminal.
+    ///
+    /// This may be sent once during the initialization of a surface
+    /// (as part of the init call) to indicate the initial size requested
+    /// for the window if it is not maximized or fullscreen.
+    ///
+    /// This may also be sent at any time after the surface is initialized
+    /// to note the new "default size" of the window. This should in general
+    /// be ignored, but may be useful if the apprt wants to support
+    /// a "return to default size" action.
     initial_size: InitialSize,
 
     /// The cell size has changed to the given dimensions in pixels.
@@ -155,8 +169,12 @@ pub const Action = union(Key) {
     /// Show a desktop notification.
     desktop_notification: DesktopNotification,
 
-    /// Set the title of the target.
+    /// Set the title of the target to the requested value.
     set_title: SetTitle,
+
+    /// Set the title of the target to a prompted value. It is up to
+    /// the apprt to prompt.
+    prompt_title,
 
     /// The current working directory has changed for the target terminal.
     pwd: Pwd,
@@ -223,6 +241,9 @@ pub const Action = union(Key) {
     /// for changes.
     config_change: ConfigChange,
 
+    /// Closes the currently focused window.
+    close_window,
+
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
         quit,
@@ -231,6 +252,7 @@ pub const Action = union(Key) {
         close_tab,
         new_split,
         close_all_windows,
+        toggle_maximize,
         toggle_fullscreen,
         toggle_tab_overview,
         toggle_window_decorations,
@@ -244,12 +266,14 @@ pub const Action = union(Key) {
         toggle_split_zoom,
         present_terminal,
         size_limit,
+        reset_window_size,
         initial_size,
         cell_size,
         inspector,
         render_inspector,
         desktop_notification,
         set_title,
+        prompt_title,
         pwd,
         mouse_shape,
         mouse_visibility,
@@ -262,11 +286,12 @@ pub const Action = union(Key) {
         color_change,
         reload_config,
         config_change,
+        close_window,
     };
 
     /// Sync with: ghostty_action_u
     pub const CValue = cvalue: {
-        const key_fields = @typeInfo(Key).Enum.fields;
+        const key_fields = @typeInfo(Key).@"enum".fields;
         var union_fields: [key_fields.len]std.builtin.Type.UnionField = undefined;
         for (key_fields, 0..) |field, i| {
             const action = @unionInit(Action, field.name, undefined);
@@ -284,7 +309,7 @@ pub const Action = union(Key) {
             };
         }
 
-        break :cvalue @Type(.{ .Union = .{
+        break :cvalue @Type(.{ .@"union" = .{
             .layout = .@"extern",
             .tag_type = Key,
             .fields = &union_fields,
@@ -300,7 +325,7 @@ pub const Action = union(Key) {
 
     /// Returns the value type for the given key.
     pub fn Value(comptime key: Key) type {
-        inline for (@typeInfo(Action).Union.fields) |field| {
+        inline for (@typeInfo(Action).@"union".fields) |field| {
             const field_key = @field(Key, field.name);
             if (field_key == key) return field.type;
         }
@@ -381,6 +406,7 @@ pub const Fullscreen = enum(c_int) {
     /// window. This is much faster to enter and exit than the native mode.
     macos_non_native,
     macos_non_native_visible_menu,
+    macos_non_native_padded_notch,
 };
 
 pub const SecureInput = enum(c_int) {

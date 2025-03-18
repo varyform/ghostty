@@ -7,7 +7,7 @@ const builtin = @import("builtin");
 
 const apprt = @import("../apprt.zig");
 const font = @import("../font/main.zig");
-const renderer = @import("../renderer.zig");
+const rendererpkg = @import("../renderer.zig");
 const Command = @import("../Command.zig");
 const WasmTarget = @import("../os/wasm/target.zig").Target;
 
@@ -19,7 +19,7 @@ const GitVersion = @import("GitVersion.zig");
 /// TODO: When Zig 0.14 is released, derive this from build.zig.zon directly.
 /// Until then this MUST match build.zig.zon and should always be the
 /// _next_ version to release.
-const app_version: std.SemanticVersion = .{ .major = 1, .minor = 0, .patch = 2 };
+const app_version: std.SemanticVersion = .{ .major = 1, .minor = 1, .patch = 3 };
 
 /// Standard build configuration options.
 optimize: std.builtin.OptimizeMode,
@@ -28,11 +28,10 @@ wasm_target: WasmTarget,
 
 /// Comptime interfaces
 app_runtime: apprt.Runtime = .none,
-renderer: renderer.Impl = .opengl,
+renderer: rendererpkg.Impl = .opengl,
 font_backend: font.Backend = .freetype,
 
 /// Feature flags
-adwaita: bool = false,
 x11: bool = false,
 wayland: bool = false,
 sentry: bool = true,
@@ -55,6 +54,8 @@ emit_helpgen: bool = false,
 emit_docs: bool = false,
 emit_webdata: bool = false,
 emit_xcframework: bool = false,
+emit_terminfo: bool = false,
+emit_termcap: bool = false,
 
 /// Environmental properties
 env: std.process.EnvMap,
@@ -68,7 +69,9 @@ pub fn init(b: *std.Build) !Config {
 
         // If we're building for macOS and we're on macOS, we need to
         // use a generic target to workaround compilation issues.
-        if (result.result.os.tag == .macos and builtin.target.isDarwin()) {
+        if (result.result.os.tag == .macos and
+            builtin.target.os.tag.isDarwin())
+        {
             result = genericMacOSTarget(b, null);
         }
 
@@ -108,7 +111,6 @@ pub fn init(b: *std.Build) !Config {
 
     //---------------------------------------------------------------
     // Comptime Interfaces
-
     config.font_backend = b.option(
         font.Backend,
         "font-backend",
@@ -122,19 +124,13 @@ pub fn init(b: *std.Build) !Config {
     ) orelse apprt.Runtime.default(target.result);
 
     config.renderer = b.option(
-        renderer.Impl,
+        rendererpkg.Impl,
         "renderer",
         "The app runtime to use. Not all values supported on all platforms.",
-    ) orelse renderer.Impl.default(target.result, wasm_target);
+    ) orelse rendererpkg.Impl.default(target.result, wasm_target);
 
     //---------------------------------------------------------------
     // Feature Flags
-
-    config.adwaita = b.option(
-        bool,
-        "gtk-adwaita",
-        "Enables the use of Adwaita when using the GTK rendering backend.",
-    ) orelse true;
 
     config.flatpak = b.option(
         bool,
@@ -306,6 +302,27 @@ pub fn init(b: *std.Build) !Config {
         break :emit_docs path != null;
     };
 
+    config.emit_terminfo = b.option(
+        bool,
+        "emit-terminfo",
+        "Install Ghostty terminfo source file",
+    ) orelse switch (target.result.os.tag) {
+        .windows => true,
+        else => switch (optimize) {
+            .Debug => true,
+            .ReleaseSafe, .ReleaseFast, .ReleaseSmall => false,
+        },
+    };
+
+    config.emit_termcap = b.option(
+        bool,
+        "emit-termcap",
+        "Install Ghostty termcap file",
+    ) orelse switch (optimize) {
+        .Debug => true,
+        .ReleaseSafe, .ReleaseFast, .ReleaseSmall => false,
+    };
+
     config.emit_webdata = b.option(
         bool,
         "emit-webdata",
@@ -316,12 +333,12 @@ pub fn init(b: *std.Build) !Config {
         bool,
         "emit-xcframework",
         "Build and install the xcframework for the macOS library.",
-    ) orelse builtin.target.isDarwin() and
+    ) orelse builtin.target.os.tag.isDarwin() and
         target.result.os.tag == .macos and
         config.app_runtime == .none and
         (!config.emit_bench and
-        !config.emit_test_exe and
-        !config.emit_helpgen);
+            !config.emit_test_exe and
+            !config.emit_helpgen);
 
     //---------------------------------------------------------------
     // System Packages
@@ -344,13 +361,14 @@ pub fn init(b: *std.Build) !Config {
             "libpng",
             "zlib",
             "oniguruma",
+            "gtk4-layer-shell",
         }) |dep| {
             _ = b.systemIntegrationOption(
                 dep,
                 .{
                     // If we're not on darwin we want to use whatever the
                     // default is via the system package mode
-                    .default = if (target.result.isDarwin()) false else null,
+                    .default = if (target.result.os.tag.isDarwin()) false else null,
                 },
             );
         }
@@ -361,6 +379,11 @@ pub fn init(b: *std.Build) !Config {
             "glslang",
             "spirv-cross",
             "simdutf",
+
+            // This is default false because it is used for testing
+            // primarily and not official packaging. The packaging
+            // guide advises against building the GLFW backend.
+            "glfw3",
         }) |dep| {
             _ = b.systemIntegrationOption(dep, .{ .default = false });
         }
@@ -374,13 +397,12 @@ pub fn addOptions(self: *const Config, step: *std.Build.Step.Options) !void {
     // We need to break these down individual because addOption doesn't
     // support all types.
     step.addOption(bool, "flatpak", self.flatpak);
-    step.addOption(bool, "adwaita", self.adwaita);
     step.addOption(bool, "x11", self.x11);
     step.addOption(bool, "wayland", self.wayland);
     step.addOption(bool, "sentry", self.sentry);
     step.addOption(apprt.Runtime, "app_runtime", self.app_runtime);
     step.addOption(font.Backend, "font_backend", self.font_backend);
-    step.addOption(renderer.Impl, "renderer", self.renderer);
+    step.addOption(rendererpkg.Impl, "renderer", self.renderer);
     step.addOption(ExeEntrypoint, "exe_entrypoint", self.exe_entrypoint);
     step.addOption(WasmTarget, "wasm_target", self.wasm_target);
     step.addOption(bool, "wasm_shared", self.wasm_shared);
@@ -419,10 +441,9 @@ pub fn fromOptions() Config {
 
         .version = options.app_version,
         .flatpak = options.flatpak,
-        .adwaita = options.adwaita,
         .app_runtime = std.meta.stringToEnum(apprt.Runtime, @tagName(options.app_runtime)).?,
         .font_backend = std.meta.stringToEnum(font.Backend, @tagName(options.font_backend)).?,
-        .renderer = std.meta.stringToEnum(renderer.Impl, @tagName(options.renderer)).?,
+        .renderer = std.meta.stringToEnum(rendererpkg.Impl, @tagName(options.renderer)).?,
         .exe_entrypoint = std.meta.stringToEnum(ExeEntrypoint, @tagName(options.exe_entrypoint)).?,
         .wasm_target = std.meta.stringToEnum(WasmTarget, @tagName(options.wasm_target)).?,
         .wasm_shared = options.wasm_shared,
@@ -486,6 +507,7 @@ pub const ExeEntrypoint = enum {
     mdgen_ghostty_5,
     webgen_config,
     webgen_actions,
+    webgen_commands,
     bench_parser,
     bench_stream,
     bench_codepoint_width,
